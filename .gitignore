@@ -1,0 +1,44 @@
+# Environments and API Keys
+.env
+env.yaml
+gcp-credentials.json
+*.local
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+env/
+
+# Node/JavaScript
+node_modules/
+
+# Databases & Caches
+*.db
+local_dev.db
+match_url_cache.json
+cache/
+
+# Heavy Media and Logs
+outputs/
+Outputs/
+uploads/
+downloaded_files/
+grid_debug/
+brain/
+logs/
+*.log
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Temporary test results
+test_pipeline_results.json
+.tempmediaStorage/
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store

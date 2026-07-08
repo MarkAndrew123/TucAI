@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+python-multipart
+opencv-python>=4.8
+numpy>=1.24
+requests>=2.31
+curl_cffi>=0.5
+openai>=1.0
+python-dotenv>=1.0
+ffmpeg-python>=0.2
+pymysql
+cryptography
+google-cloud-storage
+google-cloud-run>=0.10.1
+beautifulsoup4
+google-cloud-firestore
