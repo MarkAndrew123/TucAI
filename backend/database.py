@@ -143,7 +143,7 @@ def save_highlight_project(
 def update_project_status(project_id: str, status: str, current_moment_index: int = None, 
                           total_moments: int = None, stage_message: str = None,
                           timeline_state: list = None, video_url: str = None,
-                           last_error_log: str = None, token: str = None):
+                           last_error_log: str = None, token: str = None, user_id: str = None):
     """Lightweight status update for real-time progress tracking in Firestore."""
     body = {"status": status, "updated_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
     if current_moment_index is not None:
@@ -158,9 +158,11 @@ def update_project_status(project_id: str, status: str, current_moment_index: in
         body["video_url"] = video_url
     if last_error_log is not None:
         body["last_error_log"] = last_error_log
+    if user_id is not None:
+        body["user_id"] = user_id
 
     # Firestore handles updates efficiently without token/service_role complexity
-    db.collection('projects').document(project_id).update(body)
+    db.collection('projects').document(project_id).set(body, merge=True)
     return True
 
 def delete_highlight_project(project_id: str, token: str = None) -> bool:

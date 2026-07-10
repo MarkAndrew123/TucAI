@@ -7,7 +7,8 @@ from config import AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYM
 
 # Directory to save debug grid images
 GRID_DEBUG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "grid_debug")
-os.makedirs(GRID_DEBUG_DIR, exist_ok=True)
+if os.getenv("GRID_DEBUG") == "true":
+    os.makedirs(GRID_DEBUG_DIR, exist_ok=True)
 
 def get_client():
     if not AZURE_OPENAI_ENDPOINT:
@@ -31,6 +32,7 @@ def read_scoreboard_clock(base64_frame: str) -> str:
     prompt = """
     Look at the football scoreboard in this image.
     Extract the match clock time (mm:ss).
+    IMPORTANT ANTI-HALLUCINATION: A football match ONLY lasts 90-130 minutes. If you read a time like "319:40" or "328:34", you are hallucinating a sponsor logo or jersey number as part of the clock! Ignore the fake leading digit (e.g. "319:40" is actually "19:40").
     Reply ONLY with the time in mm:ss format (e.g. 22:30). If you cannot see a clock, reply with NONE.
     """
     
@@ -49,6 +51,53 @@ def read_scoreboard_clock(base64_frame: str) -> str:
     except Exception as e:
         print(f"Error reading scoreboard: {e}")
         return ""
+
+def grid_scan_for_clock(video_path: str, start_ts: float, window_seconds: float) -> tuple:
+    """Extracts a 3x3 grid (9 frames) spanning window_seconds to find a visible clock."""
+    from pipeline.video import create_frame_grid_base64
+    client = get_client()
+    if not client:
+        return None, None
+        
+    interval_secs = window_seconds / 9.0
+    grid_b64 = create_frame_grid_base64(video_path, start_ts, interval_secs=interval_secs, num_frames=9)
+    if not grid_b64:
+        return None, None
+        
+    prompt = """You are looking at a grid of 9 frames from a football match.
+Each frame has a burned-in label (e.g. Frame 1: ...).
+Look for the actual match scoreboard clock in each frame.
+Find the FIRST frame that clearly shows a running match clock.
+Reply ONLY with the frame number and the clock time in this exact format:
+FRAME | mm:ss
+Example: 3 | 47:15
+If NO frames show a match clock, reply exactly with: NONE"""
+
+    try:
+        response = client.chat.completions.create(
+            model=AZURE_OPENAI_DEPLOYMENT,
+            messages=[
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{grid_b64}"}}
+                ]}
+            ],
+            max_tokens=20
+        )
+        text = response.choices[0].message.content.strip()
+        if "NONE" in text.upper():
+            return None, None
+            
+        # Parse "3 | 47:15"
+        match = re.search(r'(\d+)\s*\|\s*(\d+:\d+)', text)
+        if match:
+            frame_num = int(match.group(1))
+            clock_time = match.group(2)
+            found_ts = start_ts + ((frame_num - 1) * interval_secs)
+            return found_ts, clock_time
+    except Exception as e:
+        print(f"  [Grid Scan] Error: {e}")
+    return None, None
 
 # ─────────────────────────────────────────────────────────────
 # SMART NAVIGATION — read scoreboard and jump until we're close
@@ -82,14 +131,18 @@ def navigate_to_minute(video_path: str, target_match_seconds: int, initial_ts: f
         
         # Loop detection: if we've been here before (within 30s), we're stuck
         position_key = round(current_ts / 30) * 30  # bucket into 30s windows
-        if position_key in visited_positions and known_readings:
-            # We've been here before — calculate from known data instead
-            best = min(known_readings, key=lambda r: abs(r[1] - target_match_seconds))
-            calculated_ts = best[0] + (target_match_seconds - best[1])
-            if video_duration:
-                calculated_ts = max(0, min(calculated_ts, video_duration - 1))
-            print(f"  [Navigate] ⚡ Loop detected at {current_ts:.0f}s. Using math from known reading: {best[1]//60}:{best[1]%60:02d} @ {best[0]:.0f}s → target {calculated_ts:.0f}s")
-            return calculated_ts
+        if position_key in visited_positions:
+            if known_readings:
+                # We've been here before — calculate from known data instead
+                best = min(known_readings, key=lambda r: abs(r[1] - target_match_seconds))
+                calculated_ts = best[0] + (target_match_seconds - best[1])
+                if video_duration:
+                    calculated_ts = max(0, min(calculated_ts, video_duration - 1))
+                print(f"  [Navigate] ⚡ Loop detected at {current_ts:.0f}s. Using math from known reading: {best[1]//60}:{best[1]%60:02d} @ {best[0]:.0f}s → target {calculated_ts:.0f}s")
+                return calculated_ts
+            else:
+                print(f"  [Navigate] ⚡ Loop detected at {current_ts:.0f}s, and no known readings available. Aborting.")
+                return current_ts
         visited_positions.add(position_key)
         
         print(f"  [Navigate Step {nav_step+1}] Reading scoreboard at video {current_ts:.0f}s...")
@@ -104,22 +157,70 @@ def navigate_to_minute(video_path: str, target_match_seconds: int, initial_ts: f
         print(f"  [Navigate] Scoreboard reads: {clock_str}")
         
         if not clock_str or clock_str.upper() == "NONE":
-            if known_readings:
-                # We have a known reading — calculate the target position mathematically
-                best = min(known_readings, key=lambda r: abs(r[1] - target_match_seconds))
+            # Filter known readings to only those in the SAME half as the target
+            target_is_h1 = target_match_seconds <= 2700
+            target_is_h2 = 2700 < target_match_seconds <= 5400
+            
+            same_half_readings = []
+            for r_ts, r_clock in known_readings:
+                if target_is_h1 and r_clock <= 2700: same_half_readings.append((r_ts, r_clock))
+                elif target_is_h2 and 2700 < r_clock <= 5400: same_half_readings.append((r_ts, r_clock))
+                elif not target_is_h1 and not target_is_h2 and r_clock > 5400: same_half_readings.append((r_ts, r_clock))
+
+            if same_half_readings:
+                # We have a known reading IN THE SAME HALF — math is 100% reliable
+                best = min(same_half_readings, key=lambda r: abs(r[1] - target_match_seconds))
                 calculated_ts = best[0] + (target_match_seconds - best[1])
                 if video_duration:
                     calculated_ts = max(0, min(calculated_ts, video_duration - 1))
-                print(f"  [Navigate] No clock visible. Calculating from known reading: {best[1]//60}:{best[1]%60:02d} @ {best[0]:.0f}s → jumping to {calculated_ts:.0f}s")
+                print(f"  [Navigate] No clock visible. Math from same-half reading: {best[1]//60}:{best[1]%60:02d} @ {best[0]:.0f}s → jumping to {calculated_ts:.0f}s")
                 current_ts = calculated_ts
-            elif current_ts > initial_ts and initial_ts > 0:
-                # We jumped forward and found nothing. Try backward from initial.
-                print(f"  [Navigate] No clock visible. Trying backward from initial estimate...")
-                current_ts = max(0, initial_ts - jump_size)
             else:
-                print(f"  [Navigate] No clock visible (commercial/halftime). Jumping +{jump_size}s...")
-                current_ts += jump_size
-            continue
+                # We don't have safe same-half math. Use the Context-Aware Grid Scan!
+                
+                # Check if we are stuck because of a cross-half jump
+                target_is_h1 = target_match_seconds <= 2700
+                target_is_h2 = 2700 < target_match_seconds <= 5400
+                
+                is_cross_half = False
+                if known_readings:
+                    # If any known reading is in a different half than the target, we're likely crossing
+                    for r_ts, r_clock in known_readings:
+                        if (target_is_h2 and r_clock <= 2700) or (target_is_h1 and 2700 < r_clock <= 5400):
+                            is_cross_half = True
+                            break
+                            
+                if is_cross_half:
+                    print(f"  [Navigate] Cross-Half Commercial detected! Initiating 15-minute Grid Scan to bridge halftime...")
+                    scan_start_ts = current_ts + 900
+                    found_ts, found_clock = grid_scan_for_clock(video_path, scan_start_ts, window_seconds=900)
+                    
+                    if found_ts is not None:
+                        print(f"  [Navigate] ⚡ Grid Scan found clock {found_clock} at video {found_ts:.0f}s!")
+                        current_ts = found_ts
+                        clock_str = found_clock
+                        # Fall through to parsing logic with the found clock
+                    else:
+                        print(f"  [Navigate] Grid Scan completely failed. Bumping +300s...")
+                        current_ts += 300
+                        continue
+                elif not known_readings:
+                    print(f"  [Navigate] Initial calibration stuck in broadcast! Initiating 15-minute Grid Scan...")
+                    found_ts, found_clock = grid_scan_for_clock(video_path, current_ts, window_seconds=900)
+                    if found_ts is not None:
+                        print(f"  [Navigate] ⚡ Grid Scan found clock {found_clock} at video {found_ts:.0f}s!")
+                        current_ts = found_ts
+                        clock_str = found_clock
+                        # Fall through to parsing logic with the found clock
+                    else:
+                        print(f"  [Navigate] Grid Scan completely failed. Bumping +300s...")
+                        current_ts += 300
+                        continue
+                else:
+                    # NOT a cross-half jump. This is just a minor desync or a brief replay graphic.
+                    print(f"  [Navigate] No clock visible. Bumping +60s...")
+                    current_ts += 60
+                    continue
         
         # Parse the clock
         clock_match = re.search(r'(\d+):(\d+)', clock_str)
@@ -137,6 +238,16 @@ def navigate_to_minute(video_path: str, target_match_seconds: int, initial_ts: f
         
         diff_seconds = target_match_seconds - clock_total
         
+        # If crossing a boundary, inject the estimated physical break into the math to leap over it
+        if clock_total <= 2700 and target_match_seconds > 2700:
+            diff_seconds += 15 * 60
+            print("  [Navigate] ⚠ Crossing halftime: Added 15 min break to jump math to leap over commercials.")
+        elif clock_total > 2700 and target_match_seconds <= 2700:
+            diff_seconds -= 15 * 60
+        elif clock_total <= 5400 and target_match_seconds > 5400:
+            diff_seconds += 5 * 60
+            print("  [Navigate] ⚠ Crossing fulltime: Added 5 min break to jump math to leap over commercials.")
+        
         target_minutes = target_match_seconds // 60
         target_rem_seconds = target_match_seconds % 60
         
@@ -148,21 +259,24 @@ def navigate_to_minute(video_path: str, target_match_seconds: int, initial_ts: f
             print(f"  [Navigate] ✓ Calibrated timestamp: {current_ts:.0f}s")
             return max(0, current_ts)
         
-        # We're far off — jump by the EXACT difference
-        print(f"  [Navigate] Jumping exact difference {diff_seconds:+.0f}s...")
+        # We're far off — jump by the EXACT difference (with break injections)
+        print(f"  [Navigate] Jumping difference {diff_seconds:+.0f}s...")
         current_ts = max(0, current_ts + diff_seconds)
     
-    # Exhausted steps — use the best available data
-    if known_readings:
-        # Calculate mathematically from the best known reading
-        best = min(known_readings, key=lambda r: abs(r[1] - target_match_seconds))
+    # Exhausted steps — use the best available data from the SAME half if possible
+    target_is_h1 = target_match_seconds <= 2700
+    target_is_h2 = 2700 < target_match_seconds <= 5400
+    same_half_readings = [r for r in known_readings if (target_is_h1 and r[1] <= 2700) or (target_is_h2 and 2700 < r[1] <= 5400) or (not target_is_h1 and not target_is_h2 and r[1] > 5400)]
+    
+    if same_half_readings:
+        best = min(same_half_readings, key=lambda r: abs(r[1] - target_match_seconds))
         calculated_ts = best[0] + (target_match_seconds - best[1])
         if video_duration:
             calculated_ts = max(0, min(calculated_ts, video_duration - 1))
-        print(f"  [Navigate] ⚠ Max steps reached. Calculated from known reading: {best[1]//60}:{best[1]%60:02d} @ {best[0]:.0f}s → {calculated_ts:.0f}s")
+        print(f"  [Navigate] ⚠ Max steps reached. Math from same-half reading: {best[1]//60}:{best[1]%60:02d} @ {best[0]:.0f}s → {calculated_ts:.0f}s")
         return calculated_ts
     else:
-        print(f"  [Navigate] ⚠ Could not find any scoreboard. Using best guess: {current_ts:.0f}s")
+        print(f"  [Navigate] ⚠ Could not find any scoreboard in target half. Using best guess: {current_ts:.0f}s")
         return current_ts
 
 # ─────────────────────────────────────────────────────────────
@@ -209,6 +323,7 @@ IMPORTANT: There are ONLY {num_frames} frames in this grid. Do NOT report more t
 - A frame is "IN SYNC" if the actual scoreboard clock is within ±90 seconds of the expected time.
 - A frame is "DESYNCED" if the actual scoreboard clock differs by more than ±90 seconds, OR if no scoreboard is visible (commercial break, halftime graphics, etc.).
 - Report ONLY frames 1 through {num_frames}. Do NOT report any frames beyond {num_frames}.
+- IMPORTANT ANTI-HALLUCINATION: A football match ONLY lasts 90-130 minutes. If you read a time like "319:40" or "328:34", you are hallucinating a sponsor logo or jersey number as part of the clock! Ignore the fake leading digit (e.g. "319:40" is actually "19:40").
 
 ## OUTPUT FORMAT (plain text, no markdown, no code blocks):
 For each frame, write one line:
@@ -335,7 +450,7 @@ def _detect_replay_grid(grid_b64: str) -> dict:
         return {"replay_detected": False, "last_replay_frame": 0, "live_play_resumed": True}
 
 def analyze_moment(video_path: str, synced_ts: float, moment_context: dict,
-                   grid_fn, frame_fn) -> tuple[float, float, str]:
+                   grid_fn, frame_fn, video_duration: float = None) -> tuple[float, float, str]:
     """
     Full iterative analysis of a match moment.
     
@@ -362,7 +477,7 @@ def analyze_moment(video_path: str, synced_ts: float, moment_context: dict,
     print(f"  SMART NAVIGATION — Getting to match clock {target_nav_minute}' (from {minute}'{added_str})")
     print(f"  {'─'*60}")
     
-    navigated_ts = navigate_to_minute(video_path, target_nav_minute * 60, synced_ts, frame_fn)
+    navigated_ts = navigate_to_minute(video_path, target_nav_minute * 60, synced_ts, frame_fn, video_duration=video_duration)
     
     # Calculate the video offset so dumb cuts can use it later
     calibrated_offset = navigated_ts - (target_nav_minute * 60)
@@ -407,15 +522,16 @@ def analyze_moment(video_path: str, synced_ts: float, moment_context: dict,
             continue
         
         # ── Save grid image to disk for debugging ──
-        grid_filename = f"grid_minute{minute}_{event_type}_attempt{attempt+1}.jpg"
-        grid_path = os.path.join(GRID_DEBUG_DIR, grid_filename)
-        try:
-            grid_bytes = base64.b64decode(grid_b64)
-            with open(grid_path, "wb") as f:
-                f.write(grid_bytes)
-            print(f"  📸 Grid saved: {grid_path}")
-        except Exception as e:
-            print(f"  ⚠ Could not save grid image: {e}")
+        if os.getenv("GRID_DEBUG") == "true":
+            grid_filename = f"grid_minute{minute}_{event_type}_attempt{attempt+1}.jpg"
+            grid_path = os.path.join(GRID_DEBUG_DIR, grid_filename)
+            try:
+                grid_bytes = base64.b64decode(grid_b64)
+                with open(grid_path, "wb") as f:
+                    f.write(grid_bytes)
+                print(f"  📸 Grid saved: {grid_path}")
+            except Exception as e:
+                print(f"  ⚠ Could not save grid image: {e}")
             
         # ── Run deep AI analysis ──
         analysis = _deep_analyze_grid(grid_b64, moment_context, frame_timestamps)
@@ -446,9 +562,9 @@ def analyze_moment(video_path: str, synced_ts: float, moment_context: dict,
             clips = []
             
             if "goal" in event_lower:
-                # Clip 1: 12s buildup, 2s celebration
+                # Clip 1: 12s buildup, 6s celebration
                 live_start = max(0, climax_ts - 12)
-                live_end = climax_ts + 2
+                live_end = climax_ts + 6
                 clips.append({
                     "type": "live",
                     "start": live_start,
@@ -523,9 +639,10 @@ def analyze_moment(video_path: str, synced_ts: float, moment_context: dict,
                 
                 if grid_b64:
                     # Save for debug
-                    os.makedirs("grid_debug", exist_ok=True)
-                    with open(f"grid_debug/replay_hunt_minute{minute}_attempt{r_attempt+1}.jpg", "wb") as f:
-                        f.write(base64.b64decode(grid_b64))
+                    if os.getenv("GRID_DEBUG") == "true":
+                        os.makedirs("grid_debug", exist_ok=True)
+                        with open(f"grid_debug/replay_hunt_minute{minute}_attempt{r_attempt+1}.jpg", "wb") as f:
+                            f.write(base64.b64decode(grid_b64))
                         
                     replay_analysis = _detect_replay_grid(grid_b64)
                     

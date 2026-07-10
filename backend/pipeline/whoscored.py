@@ -10,10 +10,13 @@ from pipeline.espn import HighlightMoment, AmbiguousMatchError
 class PlayerNotFoundError(Exception):
     def __init__(self, message, candidates=None):
         super().__init__(message)
+        self.message = message
         self.candidates = candidates or []
 
 def normalize_name(s):
-    return ''.join(c for c in unicodedata.normalize('NFD', str(s)) if unicodedata.category(c) != 'Mn').lower()
+    s = ''.join(c for c in unicodedata.normalize('NFD', str(s)) if unicodedata.category(c) != 'Mn').lower()
+    s = re.sub(r'[^\w\s]', ' ', s)
+    return ' '.join(s.split())
 
 def search_and_extract_whoscored(match_name: str, year: str, player_target: str) -> list[HighlightMoment]:
     query = f"{match_name} {year}" if year else match_name
@@ -112,13 +115,14 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
             if os.path.exists(cache_file):
                 with open(cache_file, "r", encoding="utf-8") as f:
                     cache = json.load(f)
+            
             cache[query] = whoscored_url
             with open(cache_file, "w", encoding="utf-8") as f:
                 json.dump(cache, f)
         except:
             pass
-            
-    # 2. Extract WhoScored Data (using curl_cffi to impersonate Chrome's TLS fingerprint)
+
+    # 2. Scrape WhoScored Page
     print(f"\n[2] Navigating to WhoScored via curl_cffi (Chrome TLS): {whoscored_url}")
     html = None
     for attempt in range(3):
@@ -145,7 +149,7 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
     if not html:
         print("  ✗ All attempts to fetch WhoScored failed.")
         return []
-
+        
     match = re.search(r'matchCentreData:\s*({.*?}),\s*matchCentreEventTypeJson', html, re.DOTALL)
     if not match:
         print("  ✗ Could not find 'matchCentreData' in the HTML.")
@@ -173,7 +177,7 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
             print("  ✗ This means WhoScored does NOT have data for this specific match. Falling back...")
             return []
     
-    # 3. Find Player (Robust Tokenized Matching)
+    # 3. Find Player (Robust Tokenized Matching with Initials Support)
     name_dict = data.get('playerIdNameDictionary', {})
     normalized_target = normalize_name(player_target)
     target_tokens = set(normalized_target.split())
@@ -183,7 +187,19 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
         norm_name = normalize_name(name)
         name_tokens = set(norm_name.split())
         
-        if target_tokens.issubset(name_tokens) or normalized_target in norm_name:
+        # Check if all target tokens match a name token (handling initials)
+        is_match = True
+        for t_token in target_tokens:
+            token_matched = False
+            for n_token in name_tokens:
+                if t_token == n_token or (len(t_token) == 1 and n_token.startswith(t_token)):
+                    token_matched = True
+                    break
+            if not token_matched:
+                is_match = False
+                break
+                
+        if is_match or normalized_target in norm_name:
             matched_players.append((int(pid), name))
             
     if not matched_players:
@@ -214,9 +230,38 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
     events = data.get('events', [])
     for event in events:
         if event.get('playerId') == player_id:
-            minute = event.get('minute', 0)
+            raw_minute = event.get('minute', 0)
             second = event.get('second', 0)
+            period = event.get('period', {}).get('value', 1)
             event_type = event.get('type', {}).get('displayName', 'Unknown')
+            
+            minute = raw_minute
+            added_time = 0
+            
+            # Handle injury time logic cleanly based on period
+            if period == 1:
+                if minute >= 45:
+                    added_time = minute - 45
+                    minute = 45
+            elif period == 2:
+                if minute < 46:
+                    minute = 46  # Second half starts at 46' to avoid overlap with 1st half
+                    added_time = 0
+                elif minute >= 90:
+                    added_time = minute - 90
+                    minute = 90
+            elif period == 3:
+                if minute < 91:
+                    minute = 91
+                elif minute >= 105:
+                    added_time = minute - 105
+                    minute = 105
+            elif period == 4:
+                if minute < 106:
+                    minute = 106
+                elif minute >= 120:
+                    added_time = minute - 120
+                    minute = 120
             
             moment_type = event_type
             if 'Goal' in event_type:
@@ -224,19 +269,23 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
             elif 'Shot' in event_type:
                 moment_type = "Big Chance"
                 
-            details = f"Exact Second: {(minute * 60) + second}. Event: {event_type}"
+            details = f"Exact Second: {(raw_minute * 60) + second}. Event: {event_type}"
             if jersey_number:
                 details += f". Jersey Number: {jersey_number}"
                 
             m = HighlightMoment(
                 minute=minute,
-                added_time=0,
+                added_time=added_time,
                 moment_type=moment_type,
                 player=player_target,
                 details=details,
                 expected_score_before="Unknown"
             )
-            m.absolute_seconds = (minute * 60) + second
+            # sort_key must ensure 2nd half comes AFTER 1st half for sorting
+            # We add an artificial bump for period to guarantee chronological sort
+            m.absolute_seconds = (raw_minute * 60) + second
+            m.sort_key = (period * 10000) + m.absolute_seconds
+            m.match_seconds = (minute * 60) + (added_time * 60) + second # True match time for offset math
             moments.append(m)
             
     if not moments:
@@ -260,7 +309,8 @@ def _serialize_moments(moments):
             "player": m.player,
             "details": m.details,
             "expected_score_before": m.expected_score_before,
-            "absolute_seconds": getattr(m, 'absolute_seconds', m.minute * 60)
+            "absolute_seconds": getattr(m, 'absolute_seconds', m.minute * 60),
+            "sort_key": getattr(m, 'sort_key', getattr(m, 'absolute_seconds', m.minute * 60))
         })
     return data
 
@@ -276,7 +326,10 @@ def _deserialize_moments(data):
             details=d["details"],
             expected_score_before=d["expected_score_before"]
         )
-        m.absolute_seconds = d["absolute_seconds"]
+        raw_abs = d.get("absolute_seconds", m.minute * 60)
+        # Sanitize poisoned caches where absolute_seconds was artificially bloated by period * 10000
+        m.absolute_seconds = raw_abs % 10000 if raw_abs >= 10000 else raw_abs
+        m.sort_key = d.get("sort_key", raw_abs)
         moments.append(m)
     return moments
 

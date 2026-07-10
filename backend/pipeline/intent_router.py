@@ -49,9 +49,9 @@ def classify_intent(chat_history: list, has_video: bool, forced_mode: str = None
     {{
         "thought_process": "Analyze the conversation using football common sense. Do we have the video, both actual teams, year, and player? If not, the intent is CONVERSATION and I will ask for what's missing.",
         "intent": "CONVERSATION" | "EDIT_COMMAND" | "GENERAL_HIGHLIGHT" | "PLAYER_FOCUS",
-        "match_name": "The full Match Name (BOTH teams). Combine the Currently Known Information with any new info from the user. Return null if completely unknown or if only ONE team is known.",
-        "year": "The match year. Combine Currently Known Information with any new info. Return null if completely unknown.",
-        "player_name": "The target player. Combine Currently Known Information with any new info. Return null if completely unknown.",
+        "match_name": "The full Match Name (BOTH teams). If the user mentions a new match, OVERRIDE the Known Information. Otherwise, use Known Information.",
+        "year": "The match year. If the user mentions a new year, OVERRIDE the Known Information.",
+        "player_name": "The target player. If the user explicitly mentions a NEW player, OVERRIDE the Known Information. Otherwise, use Known Information.",
         "chat_response": "If intent is CONVERSATION, provide a SINGLE short, natural sentence. E.g., 'What year was that match?' or 'Hi! What match are we editing today?'. Do NOT provide multiple disconnected greetings. If intent is NOT CONVERSATION, set this to null."
     }}
     
@@ -66,9 +66,15 @@ def classify_intent(chat_history: list, has_video: bool, forced_mode: str = None
             model=AZURE_OPENAI_DEPLOYMENT,
             messages=messages,
             max_tokens=300,
-            temperature=0.0
+            temperature=0.0,
+            response_format={"type": "json_object"}
         )
-        content = response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("OpenAI returned an empty response.")
+            
+        content = content.strip()
+        print(f"RAW INTENT ROUTER RESPONSE: {content}")
         
         # Remove any markdown JSON wrappers just in case
         if content.startswith("```json"):

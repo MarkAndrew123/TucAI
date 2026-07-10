@@ -19,6 +19,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Setup Rate Limiting Middleware (abuse prevention)
+from fastapi.responses import JSONResponse
+import time
+from collections import defaultdict
+
+request_counts = defaultdict(list)
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    # Exclude internal worker endpoints from rate limiting
+    if request.url.path.startswith("/internal/") or request.url.path.startswith("/webhooks/"):
+        return await call_next(request)
+        
+    # Standard header to get client IP behind load balancers/proxies
+    x_forwarded_for = request.headers.get("X-Forwarded-For")
+    if x_forwarded_for:
+        client_ip = x_forwarded_for.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
+        
+    now = time.time()
+    
+    # Filter out requests older than 1 minute (60 seconds)
+    request_counts[client_ip] = [t for t in request_counts[client_ip] if now - t < 60]
+    
+    # Limit to 60 requests per minute per IP address
+    if len(request_counts[client_ip]) >= 60:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": "Too many requests. Please wait a minute before trying again."}
+        )
+        
+    request_counts[client_ip].append(now)
+    response = await call_next(request)
+    return response
+
 from fastapi.staticfiles import StaticFiles
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -43,6 +79,16 @@ def get_or_create_session(user_id: str, token: str = None, session_id: str = Non
     if session_id:
         existing = database.get_session_details(session_id)
         if existing:
+            # If new metadata is provided mid-session, update the session in Firestore
+            updates = {}
+            if video_path and existing.get("video_path") != video_path: updates["video_path"] = video_path
+            if match_name and existing.get("match_name") != match_name: updates["match_name"] = match_name
+            if player_name and existing.get("player_name") != player_name: updates["player_name"] = player_name
+            if year and existing.get("year") != year: updates["year"] = year
+            
+            if updates:
+                database.update_session_metadata(session_id, updates)
+                
             return session_id
             
     session_id = session_id or str(uuid.uuid4())
@@ -84,6 +130,10 @@ class SignupPayload(BaseModel):
 class LoginPayload(BaseModel):
     email: str
     password: str
+
+class VerifyOtpPayload(BaseModel):
+    email: str
+    token: str
 
 @app.post("/auth/signup")
 async def auth_signup(payload: SignupPayload):
@@ -154,6 +204,40 @@ async def auth_signup(payload: SignupPayload):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/auth/verify-otp")
+async def auth_verify_otp(payload: VerifyOtpPayload):
+    from config import SUPABASE_URL, SUPABASE_ANON_KEY
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise HTTPException(status_code=500, detail="Supabase connection not configured on backend.")
+        
+    url = f"{SUPABASE_URL}/auth/v1/verify"
+    headers = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Content-Type": "application/json"
+    }
+    body = {
+        "type": "signup",
+        "email": payload.email,
+        "token": payload.token
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=body)
+        res_data = response.json()
+        
+        if response.status_code != 200:
+            err_msg = res_data.get("msg", res_data.get("error_description", "Invalid or expired verification code."))
+            raise HTTPException(status_code=response.status_code, detail=err_msg)
+            
+        return {
+            "status": "success",
+            "message": "Email verified successfully."
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/auth/login")
 async def auth_login(payload: LoginPayload):
     from config import SUPABASE_URL, SUPABASE_ANON_KEY
@@ -184,7 +268,7 @@ async def auth_login(payload: LoginPayload):
         # Fetch subscription tier
         import billing
         if user_data:
-            sub = billing.get_user_subscription(user_data.get("id"), access_token)
+            sub = database.get_user_subscription(user_data.get("id"), access_token)
             user_data["plan_tier"] = sub.get("plan_tier", "FREE")
             
         return {
@@ -276,18 +360,168 @@ async def process_chat(
             existing = database.get_session_details(session_id)
             if existing:
                 chat_history = existing.get("messages", [])
+                # If no video attached to THIS request, check if session already has one from a previous message
+                if not video_path and existing.get("video_path"):
+                    video_path = existing["video_path"]
+                    filename = filename or os.path.basename(video_path)
 
         formatted_history = []
         for msg in chat_history:
             formatted_history.append({"role": msg.get("role", "user"), "content": msg.get("text") or msg.get("content", "")})
         formatted_history.append({"role": "user", "content": prompt})
 
-        intent_data = classify_intent(formatted_history, has_video=video_path is not None, forced_mode=mode)
+        # Extract match/year details from filename if present to auto-populate intent context
+        extracted_match = None
+        extracted_year = None
+        if filename:
+            import re
+            base = os.path.basename(filename)
+            # Remove leading timestamp if present (e.g. 1783608387_)
+            base = re.sub(r'^\d+_', '', base)
+            name_without_ext = os.path.splitext(base)[0]
+            name_clean = name_without_ext.replace('_', ' ').replace('-', ' ')
+            
+            # Find year (4-digit starting with 19 or 20)
+            year_match = re.search(r'\b(19\d{2}|20\d{2})\b', name_clean)
+            if year_match:
+                extracted_year = year_match.group(1)
+                name_clean = re.sub(r'\b(19\d{2}|20\d{2})\b', '', name_clean)
+                
+            name_clean = re.sub(r'\(.*?\)', '', name_clean) # remove parens like (2)
+            name_clean = re.sub(r'\s+', ' ', name_clean).strip()
+            
+            # Find match teams (X vs Y or X v Y)
+            match_regex = re.compile(r'\b(\w+[\s\w]*)\s+vs?\s+(\w+[\s\w]*)\b', re.IGNORECASE)
+            match_found = match_regex.search(name_clean)
+            if match_found:
+                extracted_match = f"{match_found.group(1).strip()} vs {match_found.group(2).strip()}"
+
+        known_match = existing.get("match_name") if session_id and existing else None
+        known_year = existing.get("year") if session_id and existing else None
+        known_player = existing.get("player_name") if session_id and existing else None
+
+        if not known_match and extracted_match:
+            known_match = extracted_match
+            print(f"AUTO-EXTRACTED match name from filename: {known_match}")
+        if not known_year and extracted_year:
+            known_year = extracted_year
+            print(f"AUTO-EXTRACTED year from filename: {known_year}")
+
+        intent_data = classify_intent(
+            formatted_history, 
+            has_video=video_path is not None, 
+            forced_mode=mode,
+            known_match=known_match,
+            known_year=known_year,
+            known_player=known_player
+        )
+        
+        # Handle EDIT_COMMAND intent (NLP Editor integration)
+        if intent_data.get('intent') == 'EDIT_COMMAND':
+            parent_project_id = None
+            if session_id and existing:
+                for msg in reversed(existing.get("messages", [])):
+                    if msg.get("project_id"):
+                        parent_project_id = msg["project_id"]
+                        break
+                        
+            if not parent_project_id:
+                intent_data['intent'] = 'CONVERSATION'
+                intent_data['chat_response'] = "I couldn't find a previous highlight reel in this session to edit. Let's create a new one first!"
+            else:
+                parent_project = database.get_highlight_project(parent_project_id, token)
+                if not parent_project or not parent_project.get("timeline_state"):
+                    intent_data['intent'] = 'CONVERSATION'
+                    intent_data['chat_response'] = "I couldn't find the timeline of the previous video. Please try generating it again."
+                else:
+                    parent_timeline = parent_project["timeline_state"]
+                    parent_video_path = parent_project.get("video_storage_path") or video_path
+                    
+                    if not parent_video_path:
+                        intent_data['intent'] = 'CONVERSATION'
+                        intent_data['chat_response'] = "I couldn't locate the source video. Please upload it again."
+                    else:
+                        from pipeline.nlp_editor import process_edit_command
+                        try:
+                            success_msg, updated_timeline = process_edit_command(prompt, parent_timeline)
+                            import uuid
+                            project_id = str(uuid.uuid4())
+                            
+                            # Seed the new project with the updated timeline state and set status to 'rendering'
+                            database.save_highlight_project(
+                                project_id=project_id,
+                                user_id=user_id,
+                                match_name=parent_project.get("match_name"),
+                                video_storage_path=parent_video_path,
+                                timeline_state=updated_timeline,
+                                status='rendering',
+                                token=token
+                            )
+                            
+                            active_session_id = get_or_create_session(user_id, token, session_id, default_title=prompt[:30], match_name=parent_project.get("match_name"), video_path=parent_video_path)
+                            database.add_message(active_session_id, {"role": "user", "content": prompt, "file": filename})
+                            
+                            bot_msg = f"Applying edit: {success_msg}. Re-rendering highlight reel..."
+                            database.add_message(active_session_id, {
+                                "role": "assistant",
+                                "content": bot_msg,
+                                "project_id": project_id,
+                                "status": "processing"
+                            })
+                            
+                            worker_url = os.getenv("WORKER_URL", "https://tuc-worker-api-530507298858.us-central1.run.app")
+                            worker_secret = os.getenv("INTERNAL_WORKER_SECRET", "dev-secret")
+                            
+                            worker_payload = {
+                                "project_id": project_id,
+                                "user_id": user_id,
+                                "video_path": parent_video_path,
+                                "mode": "edit",
+                                "token": token,
+                                "intent_data": intent_data,
+                                "prompt": prompt
+                            }
+                            
+                            requests.post(
+                                f"{worker_url}/internal/worker",
+                                json=worker_payload,
+                                headers={"X-Worker-Secret": worker_secret},
+                                timeout=10
+                            )
+                            
+                            return {
+                                "status": "processing",
+                                "message": bot_msg,
+                                "project_id": project_id,
+                                "session_id": active_session_id
+                            }
+                            
+                        except Exception as e:
+                            import traceback
+                            traceback.print_exc()
+                            intent_data['intent'] = 'CONVERSATION'
+                            intent_data['chat_response'] = f"Failed to apply the edit: {str(e)}"
+        
+        # Hard safety stop: If AI router hallucinations try to force processing without a video or match name
+        if intent_data.get('intent') != 'CONVERSATION':
+            if not video_path:
+                intent_data['intent'] = 'CONVERSATION'
+                intent_data['chat_response'] = "Please select or upload a video for this match before we can proceed."
+            elif not intent_data.get('match_name') and not (session_id and existing and existing.get("match_name")):
+                intent_data['intent'] = 'CONVERSATION'
+                intent_data['chat_response'] = "I need to know the name of the match (both teams) before we can process the highlights."
         
         if intent_data.get('intent') == 'CONVERSATION':
-            active_session_id = get_or_create_session(user_id, token, session_id, default_title=prompt[:30])
+            active_session_id = get_or_create_session(
+                user_id, token, session_id, 
+                default_title=prompt[:30],
+                video_path=video_path,
+                match_name=intent_data.get('match_name'),
+                player_name=intent_data.get('player_name'),
+                year=intent_data.get('year')
+            )
             database.add_message(active_session_id, {"role": "user", "content": prompt, "file": filename})
-            bot_msg = intent_data.get('conversational_response', "Could you provide more details?")
+            bot_msg = intent_data.get('chat_response', "Could you provide more details?")
             database.add_message(active_session_id, {"role": "assistant", "content": bot_msg})
             return {
                 "status": "missing_info",
@@ -299,11 +533,6 @@ async def process_chat(
         year = intent_data.get('year')
         current_match = intent_data.get('match_name')
 
-        if intent_data.get('intent') in ['PLAYER_FOCUS', 'GENERAL_HIGHLIGHT']:
-            match_results = espn.get_match_from_description(current_match or prompt, player_name, year)
-            if match_results:
-                current_match = match_results[0]['name']
-
         active_session_id = get_or_create_session(user_id, token, session_id, default_title=(current_match or prompt)[:30], match_name=current_match, player_name=player_name, year=year, video_path=video_path)
         database.add_message(active_session_id, {"role": "user", "content": prompt, "file": filename})
 
@@ -312,60 +541,60 @@ async def process_chat(
 
         import billing
         is_player_focus = intent_data.get('intent') == "PLAYER_FOCUS"
-        if not billing.can_generate_highlight(user_id, is_player_focus, token):
+        can_process, block_reason = billing.check_can_process_request(user_id, is_player_focus, token)
+        if not can_process:
             msg = "You have exhausted your generation limits. Please upgrade to Pro!"
             database.add_message(active_session_id, {"role": "assistant", "content": msg, "status": "error"})
-            return {"status": "error", "message": msg, "session_id": active_session_id}
+            return {"status": "out_of_credits", "message": msg, "reason": block_reason, "session_id": active_session_id}
 
-        if not IS_LOCAL:
-            from google.cloud import run_v2
-            import json
-            client = run_v2.JobsClient()
-            job_name = f"projects/tuc-ai-prod/locations/us-central1/jobs/tuc-highlight-worker"
+        # Seed the project document in Firestore so the frontend doesn't 404 while the worker spins up
+        database.update_project_status(project_id, 'queued', stage_message="Dispatching to cloud worker...", token=token, user_id=user_id)
+
+        import json
+        import threading
+        
+        worker_url = os.getenv("WORKER_URL", "https://tuc-worker-api-530507298858.us-central1.run.app")
+        worker_secret = os.getenv("INTERNAL_WORKER_SECRET", "dev-secret")
+        
+        worker_payload = {
+            "project_id": project_id,
+            "user_id": user_id,
+            "video_path": video_path,
+            "mode": "full",
+            "token": token,
+            "intent_data": intent_data,
+            "prompt": prompt,
+            "session_id": active_session_id
+        }
+        
+        def dispatch_worker():
             try:
-                request = run_v2.RunJobRequest(
-                    name=job_name,
-                    overrides={
-                        "container_overrides": [{
-                            "env": [
-                                {"name": "JOB_PAYLOAD", "value": json.dumps({
-                                    "video_path": video_path,
-                                    "prompt": prompt,
-                                    "intent_data": intent_data,
-                                    "user_id": user_id,
-                                    "project_id": project_id,
-                                    "token": token
-                                })}
-                            ]
-                        }]
-                    }
+                print(f"Dispatching to worker API for project {project_id}...")
+                resp = requests.post(
+                    f"{worker_url}/internal/worker",
+                    json=worker_payload,
+                    headers={"X-Worker-Secret": worker_secret},
+                    timeout=3600  # 1 hour timeout keeps connection open, preventing Cloud Run scale-to-zero
                 )
-                client.run_job(request=request)
+                if resp.status_code != 200:
+                    print(f"Worker returned {resp.status_code}: {resp.text}")
+                else:
+                    print(f"Worker API successfully completed for project {project_id}")
             except Exception as e:
-                print(f"Failed to trigger Cloud Run Job: {e}")
-                background_tasks.add_task(
-                    run_pipeline_with_error_handling,
-                    pipeline, video_path, prompt,
-                    intent_data=intent_data, user_id=user_id, project_id=project_id, token=token
-                )
-        else:
-            try:
-                from celery_worker import process_highlight_job
-                process_highlight_job.delay(
-                    video_path=video_path, 
-                    prompt=prompt, 
-                    intent_data=intent_data, 
-                    user_id=user_id, 
-                    project_id=project_id, 
-                    token=token
-                )
-            except Exception as celery_err:
-                background_tasks.add_task(
-                    run_pipeline_with_error_handling,
-                    pipeline, video_path, prompt,
-                    intent_data=intent_data, user_id=user_id, project_id=project_id, token=token
-                )
-                
+                print(f"Failed or timed out dispatching to worker API: {e}. Falling back to in-process background task.")
+                # We can't use FastAPI background_tasks here because we're in a separate thread.
+                # Since the worker might be completely down, we'll try running the pipeline synchronously 
+                # (but in this thread, so it won't block the web server, though Cloud Run might throttle it).
+                try:
+                    run_pipeline_with_error_handling(
+                        pipeline, video_path, prompt,
+                        intent_data=intent_data, user_id=user_id, project_id=project_id, token=token
+                    )
+                except Exception as inner_e:
+                    print(f"Fallback pipeline failed: {inner_e}")
+                    
+        # Start the background thread
+        threading.Thread(target=dispatch_worker, daemon=True).start()
         msg = "Processing your highlight reel..."
         database.add_message(active_session_id, {"role": "assistant", "content": msg, "project_id": project_id, "status": "processing"})
         
@@ -422,7 +651,7 @@ def run_pipeline_with_error_handling(pipeline_obj, video_path, prompt, intent_da
         import traceback
         import json
         traceback.print_exc()
-        if type(e).__name__ == 'PlayerNotFoundError':
+        if type(e).__name__ in ['PlayerNotFoundError', 'AmbiguousMatchError']:
             error_data = {
                 "message": str(e),
                 "candidates": getattr(e, 'candidates', [])
@@ -477,23 +706,50 @@ def get_signed_video_url(project, user_id, token=None):
         print(f"Error dynamically signing GCS URL: {e}")
         
     return video_url
-
+    
+@app.post("/projects/{project_id}/cancel")
+async def cancel_project(project_id: str, request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token.")
+    token = auth_header.split(" ")[1]
+    user_info = verify_supabase_token(token)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+        
+    try:
+        from database import update_project_status
+        update_project_status(project_id, 'cancelled')
+        return {"status": "success", "message": "Project cancelled."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/projects/{project_id}/status")
 async def get_project_status(project_id: str, request: Request):
     auth_header = request.headers.get("Authorization")
-    token = None
-    if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token.")
+    token = auth_header.split(" ")[1]
+    user_info = verify_supabase_token(token)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Invalid token.")
         
+    user_id = user_info.get("id")
     project = database.get_highlight_project(project_id, token)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
         
+    # Enforce object-level access control
+    if project.get("user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Forbidden: You do not own this project")
+        
     # Support self-healing signed GCS URLs for completed runs
     if project.get("status") == "complete" and project.get("video_url"):
-        user_id = project.get("user_id")
         project["video_url"] = get_signed_video_url(project, user_id, token)
+        
+    # Strip sensitive error log before sending it to the client for security
+    if "last_error_log" in project:
+        project["last_error_log"] = "An unexpected error occurred while processing your video."
         
     return project
 
@@ -558,6 +814,46 @@ async def get_videos(request: Request):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.delete("/api/videos")
+async def delete_video(request: Request):
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token.")
+    token = auth_header.split(" ")[1]
+    user_info = verify_supabase_token(token)
+    if not user_info:
+        raise HTTPException(status_code=401, detail="Invalid token.")
+        
+    user_id = user_info.get("id")
+    data = await request.json()
+    blob_name = data.get("blob_name")
+    
+    if not blob_name or not blob_name.startswith(f"{user_id}/"):
+        raise HTTPException(status_code=403, detail="Unauthorized to delete this video")
+        
+    try:
+        from google.cloud import storage
+        from google.oauth2 import service_account
+        import os
+        
+        sa_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gcp-credentials.json")
+        if os.path.exists(sa_path):
+            credentials = service_account.Credentials.from_service_account_file(sa_path)
+            storage_client = storage.Client(credentials=credentials)
+        else:
+            storage_client = storage.Client()
+            
+        bucket = storage_client.bucket("tuc-ai-raw-uploads")
+        blob = bucket.blob(blob_name)
+        if blob.exists():
+            blob.delete()
+            return {"status": "success", "message": "Video deleted successfully"}
+        else:
+            raise HTTPException(status_code=404, detail="Video not found")
+            
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/chat/sessions")
 async def get_sessions(request: Request):
@@ -587,18 +883,29 @@ async def get_sessions(request: Request):
         p_ids = s.get("project_ids", [])
         
         if not p_ids:
-            # Empty chat without any generated videos
+            # Chat session without any generated videos — still show it
+            session_list.append({
+                "id": s_id,
+                "project_id": None,
+                "title": s.get("title", "New Session"),
+                "updated_at": s.get("updated_at"),
+                "created_at": s.get("created_at"),
+                "status": "chat",
+                "videoUrl": None
+            })
             continue
             
-        for pid in p_ids:
-            proj = project_map.get(pid, {})
+        if p_ids:
+            # Only use the most recent project for the sidebar thumbnail/status to prevent duplicate chat rows
+            latest_pid = p_ids[-1]
+            proj = project_map.get(latest_pid, {})
             vid_url = proj.get("video_url")
             if vid_url and not vid_url.startswith("http"):
                 vid_url = get_signed_video_url(proj, user_id, token)
                 
             session_list.append({
                 "id": s_id,
-                "project_id": pid,
+                "project_id": latest_pid,
                 "title": proj.get("match_name") or s.get("title", "New Session"),
                 "updated_at": proj.get("updated_at") or s.get("updated_at"),
                 "created_at": proj.get("created_at") or s.get("created_at"),
@@ -635,7 +942,7 @@ async def get_session_details(session_id: str, request: Request):
             continue
             
         # 1. Update stale processing statuses in Firestore
-        if msg.get("status") in ["processing", "queued", "analyzing", "rendering", "calibrating"]:
+        if msg.get("status") in ["processing", "queued", "scanning", "analyzing", "calibrating", "rendering", "cutting"]:
             if project["status"] == "complete":
                 msg["status"] = "success"
                 msg["content"] = "Your highlight reel is ready!"
@@ -649,9 +956,15 @@ async def get_session_details(session_id: str, request: Request):
                 database.db.collection("sessions").document(session_id).collection("messages").document(msg["id"]).update(update_payload)
             elif project["status"] in ["error", "failed"]:
                 msg["status"] = "error"
-                msg["content"] = f"Processing failed: {project.get('last_error_log', 'Unknown error')}"
+                # Keep error logs hidden from the end user for security/UX
+                msg["content"] = "An unexpected error occurred while processing your video. Please try again or contact support."
                 msg["text"] = msg["content"]
-                database.db.collection("sessions").document(session_id).collection("messages").document(msg["id"]).update(msg)
+                update_payload = {
+                    "status": "error",
+                    "content": msg["content"],
+                    "text": msg["text"]
+                }
+                database.db.collection("sessions").document(session_id).collection("messages").document(msg["id"]).update(update_payload)
             elif project["status"] == "conversational_pushback":
                 import json
                 msg["status"] = "error"
@@ -925,77 +1238,98 @@ class WorkerPayload(BaseModel):
     token: str = None
     intent_data: dict = None
     prompt: str = None
+    session_id: str = None
 
 @app.post("/internal/worker")
-async def internal_worker(request: Request, payload: WorkerPayload, background_tasks: BackgroundTasks):
+def internal_worker(request: Request, payload: WorkerPayload):
     secret = request.headers.get("X-Worker-Secret")
     expected_secret = os.getenv("INTERNAL_WORKER_SECRET", "dev-secret")
     if secret != expected_secret:
         raise HTTPException(status_code=403, detail="Forbidden: Invalid internal worker secret")
+    
+    try:
+        import database
+        from pipeline.orchestrator import HighlightPipeline
+        import json
         
-    def run_worker_task(data: WorkerPayload):
-        try:
-            print(f"\n\n{'='*50}")
-            print(f"=== [DEDICATED WORKER] TASK FOR {data.project_id} ===")
-            print(f"{'='*50}\n")
-            
-            import database
-            from pipeline.orchestrator import HighlightPipeline
-            import json
-            
-            pipeline = HighlightPipeline(OUTPUT_DIR)
-            intent_data_parsed = data.intent_data or {}
-            
-            local_video_path = data.video_path
-            # Download if it's a GCS blob name
-            if not os.path.exists(local_video_path):
-                temp_path = f"/tmp/{os.path.basename(local_video_path)}"
-                try:
-                    from google.cloud import storage
-                    storage_client = storage.Client()
-                    bucket = storage_client.bucket("tuc-ai-raw-uploads")
-                    blob = bucket.blob(data.video_path)
-                    blob.download_to_filename(temp_path)
-                    local_video_path = temp_path
-                except Exception as e:
-                    print(f"Failed to download video from GCS: {e}")
-                    database.update_project_status(data.project_id, 'error', last_error_log=f"Failed to download video from cloud storage: {e}", token=data.token)
-                    return
-            
-            project_state = database.get_highlight_project(data.project_id, data.token)
-            
-            if data.mode == "edit":
-                print("  [Mode: Edit] Bypassing AI intent and jumping straight to render_from_timeline.")
-                timeline_state = project_state.get('timeline_state') if project_state else None
-                if not timeline_state:
-                    raise Exception("Cannot render edit: timeline_state not found in database.")
-                    
-                pipeline.render_from_timeline(
-                    video_path=local_video_path,
-                    user_id=data.user_id,
-                    project_id=data.project_id,
-                    token=data.token,
-                    timeline_state=timeline_state
-                )
-            else:
-                # Normal Generation Mode
-                print("  [Mode: Generate] Running full AI pipeline.")
-                pipeline.run(
-                    video_path=local_video_path,
-                    prompt=data.prompt or "",
-                    user_id=data.user_id, 
-                    project_id=data.project_id, 
-                    token=data.token,
-                    intent_data=intent_data_parsed
-                )
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            import database
-            database.update_project_status(data.project_id, 'error', last_error_log=str(e), token=data.token)
+        print(f"\n\n{'='*50}")
+        print(f"=== [DEDICATED WORKER] TASK FOR {payload.project_id} ===")
+        print(f"{'='*50}\n")
+        
+        pipeline = HighlightPipeline(OUTPUT_DIR)
+        intent_data_parsed = payload.intent_data or {}
+        
+        local_video_path = payload.video_path
+        # Use GCS FUSE if available, otherwise fallback to download
+        fuse_path = f"/mnt/gcs/{payload.video_path}"
+        if os.path.exists(fuse_path):
+            local_video_path = fuse_path
+            print(f"Using GCS FUSE mount for direct local access: {local_video_path}")
+        elif not os.path.exists(local_video_path):
+            temp_path = f"/tmp/{os.path.basename(local_video_path)}"
+            try:
+                from google.cloud import storage
+                storage_client = storage.Client()
+                bucket = storage_client.bucket("tuc-ai-raw-uploads")
+                blob = bucket.blob(payload.video_path)
+                blob.download_to_filename(temp_path)
+                local_video_path = temp_path
+                print(f"Downloaded source video to local /tmp storage (Fallback mode).")
+            except Exception as e:
+                print(f"Failed to download video from GCS: {e}")
+                database.update_project_status(payload.project_id, 'error', last_error_log=f"Failed to download video from cloud storage: {e}", token=payload.token)
+                return {"status": "error", "message": str(e)}
+        
+        project_state = database.get_highlight_project(payload.project_id, payload.token)
+        
+        if payload.mode == "edit":
+            print("  [Mode: Edit] Bypassing AI intent and jumping straight to render_from_timeline.")
+            timeline_state = project_state.get('timeline_state') if project_state else None
+            if not timeline_state:
+                raise Exception("Cannot render edit: timeline_state not found in database.")
+                
+            pipeline.render_from_timeline(
+                video_path=local_video_path,
+                user_id=payload.user_id,
+                project_id=payload.project_id,
+                token=payload.token,
+                timeline_state=timeline_state
+            )
+        else:
+            # Normal Generation Mode
+            print("  [Mode: Generate] Running full AI pipeline.")
+            pipeline.run(
+                video_path=local_video_path,
+                prompt=payload.prompt or "",
+                user_id=payload.user_id, 
+                project_id=payload.project_id, 
+                token=payload.token,
+                intent_data=intent_data_parsed
+            )
+        
+        print(f"\n=== [DEDICATED WORKER] FINISHED {payload.project_id} ===\n")
+        return {"status": "done"}
+    except espn.AmbiguousMatchError as e:
+        import database
+        if payload.session_id:
+            database.add_message(payload.session_id, {"role": "assistant", "content": "I found multiple matches that fit that description. Which one did you mean?", "candidates": e.candidates, "status": "multiple_matches"})
+        # We must set status to 'conversational_pushback' so the frontend elegantly stops the spinner and shows the chat without a red error toast
+        database.update_project_status(payload.project_id, 'conversational_pushback', last_error_log="Multiple matches found. See chat for details.", token=payload.token)
+        return {"status": "multiple_matches"}
+    except PlayerNotFoundError as e:
+        import database
+        if payload.session_id:
+            database.add_message(payload.session_id, {"role": "assistant", "content": str(e), "status": "missing_info"})
+        # We must set status to 'conversational_pushback' so the frontend elegantly stops the spinner and shows the chat without a red error toast
+        database.update_project_status(payload.project_id, 'conversational_pushback', last_error_log=str(e), token=payload.token)
+        return {"status": "missing_info"}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        import database
+        database.update_project_status(payload.project_id, 'error', last_error_log=str(e), token=payload.token)
+        return {"status": "error", "message": str(e)}
 
-    background_tasks.add_task(run_worker_task, payload)
-    return {"status": "accepted", "message": "Background worker started."}
 
 if __name__ == "__main__":
     import uvicorn
