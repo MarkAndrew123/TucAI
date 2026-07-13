@@ -91,6 +91,13 @@ body {
   font-weight: 800;
 }
 
+.logo-img {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  object-fit: cover;
+}
+
 .nav-links {
   display: flex;
   align-items: center;
@@ -629,6 +636,14 @@ body {
   border-radius: 10px;
   font-weight: 800;
   font-size: 1.15rem;
+  margin-bottom: 1.25rem;
+}
+
+.auth-logo-img {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  object-fit: cover;
   margin-bottom: 1.25rem;
 }
 

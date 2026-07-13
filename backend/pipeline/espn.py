@@ -124,7 +124,7 @@ def extract_moments_via_ai(commentary_data: list, key_events: list) -> list:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": commentary_str}
             ],
-            max_tokens=1500
+            max_tokens=4000
         )
         content = json.loads(response.choices[0].message.content)
         return content.get('moments', [])
@@ -325,7 +325,7 @@ def search_google_locator(query: str, target_score: str = None, target_year: str
     import os
     
     search_query = f"site:espn.com {query}"
-    api_key = os.getenv("BRAVE_SEARCH_API_KEY", "BSAYP18sgVRsGdqhHveg0qF95MJYaqa")
+    api_key = os.getenv("BRAVE_SEARCH_API_KEY")
     url = "https://api.search.brave.com/res/v1/web/search"
     
     print(f"  [Strategy 2] Calling Brave API for: '{search_query}'")

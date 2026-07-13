@@ -8,7 +8,8 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import axios from 'axios';
 import HubModal from './components/HubModal';
-
+import Privacy from './components/Privacy';
+import Terms from './components/Terms';
 const TypewriterText = ({ text }) => {
   const [displayedText, setDisplayedText] = useState('');
 
@@ -60,15 +61,35 @@ const API_BASE_URL = window.location.hostname === 'localhost' || window.location
 
 function App() {
   // Navigation & Session State
-  const [view, setView] = useState('landing');
-  const [showHubModal, setShowHubModal] = useState(false); // 'landing' | 'login' | 'signup' | 'app' | 'pricing'
+  const [view, setView] = useState(() => {
+    const path = window.location.pathname;
+    if (path === '/privacy') return 'privacy';
+    if (path === '/terms') return 'terms';
+    return 'landing';
+  });
+
+  const handleNavigate = (newView) => {
+    let path = '/';
+    if (newView === 'privacy') path = '/privacy';
+    if (newView === 'terms') path = '/terms';
+    window.history.pushState({}, '', path);
+    setView(newView);
+  };
+  const [showHubModal, setShowHubModal] = useState(false); // 'landing' | 'login' | 'signup' | 'app'
   const [user, setUser] = useState(null);
   const [isYearly, setIsYearly] = useState(false);
 
   // Auth Forms State
+  const [resetEmail, setResetEmail] = useState('');
+  const [resetPassword, setResetPassword] = useState('');
+  const [resetConfirmPassword, setResetConfirmPassword] = useState('');
+  const [isResetting, setIsResetting] = useState(false);
+  const [resetError, setResetError] = useState('');
+  const [authResetToken, setAuthResetToken] = useState(null);
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authName, setAuthName] = useState('');
+  const [authOtp, setAuthOtp] = useState('');
 
   // App Editor Layout State
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -177,6 +198,23 @@ function App() {
     }
   };
 
+  const deleteUploadedVideo = (blobName, e) => {
+    e.stopPropagation();
+    showConfirm("Are you sure you want to delete this source video?", async () => {
+      try {
+        await axios.delete(`https://tuc-backend-530507298858.us-central1.run.app/api/videos`, {
+          data: { blob_name: blobName },
+          headers: { Authorization: `Bearer ${user?.token}` }
+        });
+        setUploadedVideos(prev => prev.filter(v => v.name !== blobName));
+        setLocalVideos(prev => prev.filter(v => v.name !== blobName));
+      } catch (err) {
+        console.error('Failed to delete video:', err);
+        showAlert('Failed to delete video. It may be in use by an active session.');
+      }
+    });
+  };
+
   const createNewSession = () => {
     setActiveSessionId(null);
     setMessages([]);
@@ -193,6 +231,7 @@ function App() {
   const [uploadSpeed, setUploadSpeed] = useState(0);
   const [timeRemaining, setTimeRemaining] = useState(0);
   const uploadStatsRef = useRef({ startTime: 0, lastLoaded: 0, lastTime: 0 });
+  const abortControllerRef = useRef(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [localVideos, setLocalVideos] = useState([]);
@@ -210,6 +249,31 @@ function App() {
   
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [selectedPlanForPayment, setSelectedPlanForPayment] = useState(null);
+  const [customDialog, setCustomDialog] = useState(null);
+
+  const showAlert = (message, onConfirm = null) => {
+    setCustomDialog({
+      type: 'alert',
+      message,
+      onConfirm: () => {
+        if (onConfirm) onConfirm();
+        setCustomDialog(null);
+      },
+      onCancel: () => setCustomDialog(null)
+    });
+  };
+
+  const showConfirm = (message, onConfirm) => {
+    setCustomDialog({
+      type: 'confirm',
+      message,
+      onConfirm: () => {
+        onConfirm();
+        setCustomDialog(null);
+      },
+      onCancel: () => setCustomDialog(null)
+    });
+  };
 
   const handleInitiatePayment = (plan) => {
     if (!user) {
@@ -225,7 +289,7 @@ function App() {
     const amountNGN = plan === 'Basic' ? 300000 : 750000; // in kobo
     
     if (!window.PaystackPop) {
-      alert('Paystack failed to load. Please refresh and try again.');
+      showAlert('Paystack failed to load. Please refresh and try again.');
       return;
     }
 
@@ -239,7 +303,7 @@ function App() {
         plan_tier: plan.toUpperCase()
       },
       callback: function(response){
-        alert('Payment successful! Your account is upgrading...');
+        showAlert('Payment successful! Your account is upgrading...');
         setShowPaymentModal(false);
         // In a real app, you might poll the backend here to auto-refresh the UI
       },
@@ -253,8 +317,8 @@ function App() {
   const handleLemonSqueezyCheckout = (plan) => {
     if (!user) return;
     const checkoutUrl = plan === 'Basic' 
-      ? 'https://tuc-ai.lemonsqueezy.com/checkout/buy/d46f414e-45ca-4836-b02e-a0c7a5a96200'
-      : 'https://tuc-ai.lemonsqueezy.com/checkout/buy/6eca916a-bda1-4faf-a085-faa055c41a2e';
+      ? (import.meta.env.VITE_LEMON_SQUEEZY_BASIC_URL || 'https://tuc-ai.lemonsqueezy.com/checkout/buy/d46f414e-45ca-4836-b02e-a0c7a5a96200')
+      : (import.meta.env.VITE_LEMON_SQUEEZY_PRO_URL || 'https://tuc-ai.lemonsqueezy.com/checkout/buy/6eca916a-bda1-4faf-a085-faa055c41a2e');
       
     // Pass user_id and plan_tier via custom data for the webhook
     window.location.href = `${checkoutUrl}?checkout[custom][user_id]=${user.id}&checkout[custom][plan_tier]=${plan.toUpperCase()}&checkout[email]=${user.email}`;
@@ -296,10 +360,34 @@ function App() {
 
     // Parse OAuth hash fragment from Supabase redirect
     const hash = window.location.hash;
+    const search = window.location.search;
+    
+    // Check for Supabase errors in URL
+    const searchParams = new URLSearchParams(search);
+    if (searchParams.has('error_description')) {
+      const errorMsg = searchParams.get('error_description');
+      showAlert(errorMsg.replace(/\+/g, ' '));
+      window.history.replaceState(null, '', window.location.origin + window.location.pathname);
+    }
+
+    let tokenParams = null;
     if (hash && hash.includes('access_token=')) {
-      const params = new URLSearchParams(hash.replace('#', '?'));
-      const accessToken = params.get('access_token');
+      tokenParams = new URLSearchParams(hash.replace('#', '?'));
+    } else if (search && search.includes('access_token=')) {
+      tokenParams = new URLSearchParams(search);
+    }
+
+    if (tokenParams) {
+      const accessToken = tokenParams.get('access_token');
       if (accessToken) {
+        if (tokenParams.get('type') === 'recovery') {
+          // Password recovery link - no need to fetch user profile
+          setAuthResetToken(accessToken);
+          setView('reset_password');
+          window.history.replaceState(null, '', window.location.origin + window.location.pathname);
+          return;
+        }
+
         const fetchOAuthUser = async () => {
           try {
             const res = await axios.get(`https://tuc-backend-530507298858.us-central1.run.app/auth/me`, {
@@ -313,16 +401,17 @@ function App() {
                 token: accessToken,
                 plan_tier: userData.plan_tier || 'FREE'
               };
-              setUser(sessionData);
-              localStorage.setItem('highlight_user', JSON.stringify(sessionData));
-              loadSessions(sessionData.token);
-              setView('app');
+                setUser(sessionData);
+                localStorage.setItem('highlight_user', JSON.stringify(sessionData));
+                loadSessions(sessionData.token);
+                setView('app');
+              
               // Clear hash
               window.history.replaceState(null, '', window.location.origin + window.location.pathname);
             }
           } catch (err) {
             console.error('Failed to verify OAuth login:', err);
-            alert('Failed to complete Google Sign-In. Please try again.');
+            showAlert('Failed to complete Google Sign-In. Please try again.');
           }
         };
         fetchOAuthUser();
@@ -357,6 +446,10 @@ function App() {
     // Not authenticated or no valid session
     if (path === '/login') setView('login');
     else if (path === '/signup') setView('signup');
+    else if (path === '/privacy') setView('privacy');
+    else if (path === '/terms') setView('terms');
+    else if (path === '/forgot-password') setView('forgot_password');
+    else if (path === '/reset-password') setView('reset_password');
     else setView('landing');
     
     return () => window.removeEventListener('popstate', handlePopState);
@@ -374,6 +467,14 @@ function App() {
       window.history.pushState(null, '', '/chat');
     } else if (view === 'library') {
       window.history.pushState(null, '', '/chat');
+    } else if (view === 'privacy') {
+      window.history.pushState(null, '', '/privacy');
+    } else if (view === 'terms') {
+      window.history.pushState(null, '', '/terms');
+    } else if (view === 'forgot_password') {
+      window.history.pushState(null, '', '/forgot-password');
+    } else if (view === 'reset_password') {
+      window.history.pushState(null, '', '/reset-password');
     }
   }, [view]);
 
@@ -381,6 +482,18 @@ function App() {
     if (e.target.files[0]) {
       setFile(e.target.files[0]);
     }
+  };
+
+  const cancelUpload = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    setIsUploading(false);
+    setUploadProgress(0);
+    setUploadSpeed(0);
+    setTimeRemaining(0);
+    setUploadError('Upload canceled.');
   };
 
   const handleDirectUpload = async (uploadFile) => {
@@ -417,6 +530,8 @@ function App() {
     };
 
     try {
+      abortControllerRef.current = new AbortController();
+
       // 1. Get Pre-signed URL
       const urlRes = await axios.post(`https://tuc-backend-530507298858.us-central1.run.app/api/videos/upload-url`, {
         filename: uploadFile.name,
@@ -433,7 +548,8 @@ function App() {
           headers: {
             'Content-Type': uploadFile.type || 'video/mp4'
           },
-          onUploadProgress: handleProgress
+          onUploadProgress: handleProgress,
+          signal: abortControllerRef.current.signal
         });
       } else {
         // Fallback for local testing if GCP isn't setup
@@ -441,7 +557,8 @@ function App() {
         formData.append('file', uploadFile);
         await axios.post(uploadUrl, formData, {
           headers: { Authorization: `Bearer ${user.token}` },
-          onUploadProgress: handleProgress
+          onUploadProgress: handleProgress,
+          signal: abortControllerRef.current.signal
         });
       }
 
@@ -500,7 +617,7 @@ function App() {
   const handleAuthSubmit = async (e, type) => {
     e.preventDefault();
     if (!authEmail || !authPassword || (type === 'signup' && !authName)) {
-      alert('Please fill out all fields.');
+      showAlert('Please fill out all fields.');
       return;
     }
     
@@ -530,14 +647,43 @@ function App() {
         loadSessions(sessionData.token);
         setView('app');
       } else if (response.data.status === 'verification_required') {
-        alert(response.data.message || 'Signup successful! Please check your email inbox to verify your account before logging in.');
-        setView('login');
+        showAlert('Signup successful! Please check your email for the 6-digit OTP code.');
+        setView('otp');
       } else {
-        alert(response.data.message || 'Authentication failed.');
+        showAlert(response.data.message || 'Authentication failed.');
       }
     } catch (error) {
       console.error(error);
-      alert(error.response?.data?.detail || error.message || 'Authentication error.');
+      showAlert(error.response?.data?.detail || error.message || 'Authentication error.');
+    }
+  };
+
+  const handleOtpSubmit = async (e) => {
+    e.preventDefault();
+    if (!authOtp || !authEmail) {
+      showAlert('Please enter the 6-digit code sent to your email.');
+      return;
+    }
+
+    try {
+      const payload = {
+        email: authEmail,
+        token: authOtp
+      };
+      
+      const response = await axios.post(`https://tuc-backend-530507298858.us-central1.run.app/auth/verify-otp`, payload);
+      
+      if (response.data.status === 'success') {
+        showAlert('Verification successful! You can now log in.');
+        setAuthOtp('');
+        setAuthPassword(''); // Clear password for security
+        setView('login');
+      } else {
+        showAlert(response.data.message || 'Invalid or expired OTP.');
+      }
+    } catch (error) {
+      console.error(error);
+      showAlert(error.response?.data?.detail || error.message || 'Verification error.');
     }
   };
 
@@ -592,7 +738,7 @@ function App() {
               if (project.last_error_log && project.last_error_log.startsWith('{')) {
                   const errData = JSON.parse(project.last_error_log);
                   pushbackText = errData.message;
-                  candidates = errData.candidates.map(c => ({ id: c, label: c }));
+                  candidates = errData.candidates.map(c => typeof c === 'string' ? { id: c, label: c } : c);
               }
           } catch (e) { console.error("Failed to parse pushback json", e); }
           
@@ -611,24 +757,57 @@ function App() {
           setMessages(prev => [...prev, {
             id: Date.now(),
             role: 'bot',
-            text: `Processing failed: ${project.last_error_log || 'Unknown error'}`,
+            text: "An unexpected error occurred while processing your video. Please try again or contact support.",
             status: 'error'
           }]);
           setProcessingStage(null);
-        }
-      } catch (err) {
-        console.error('Polling error:', err);
-        if (err.response && err.response.status === 404) {
+        } else if (project.status === 'cancelled') {
           clearInterval(pollingRef.current);
           pollingRef.current = null;
           setIsProcessing(false);
           setMessages(prev => [...prev, {
             id: Date.now(),
             role: 'bot',
-            text: "Failed to connect to the database. The background task crashed before it could start.",
+            text: "Video generation was cancelled.",
             status: 'error'
           }]);
           setProcessingStage(null);
+        }
+      } catch (err) {
+        console.error('Polling error:', err);
+        const status = err.response?.status;
+        
+        // Stop polling immediately for auth errors or client errors (401, 403, 404, 429)
+        if (status === 401 || status === 403 || status === 404 || status === 429) {
+          clearInterval(pollingRef.current);
+          pollingRef.current = null;
+          setIsProcessing(false);
+          setMessages(prev => [...prev, {
+            id: Date.now(),
+            role: 'bot',
+            text: status === 429 
+              ? "We are receiving too many requests. Please wait a minute before trying again." 
+              : "We are having trouble connecting to retrieve your video status. Please try again.",
+            status: 'error'
+          }]);
+          setProcessingStage(null);
+        } else {
+          // Retry count for network drops/server errors
+          if (!window.pollRetries) window.pollRetries = 0;
+          window.pollRetries += 1;
+          if (window.pollRetries >= 5) {
+            clearInterval(pollingRef.current);
+            pollingRef.current = null;
+            setIsProcessing(false);
+            setMessages(prev => [...prev, {
+              id: Date.now(),
+              role: 'bot',
+              text: "Connection lost. Please refresh the page to check status.",
+              status: 'error'
+            }]);
+            setProcessingStage(null);
+            window.pollRetries = 0;
+          }
         }
       }
     }, 2000);
@@ -760,11 +939,36 @@ function App() {
         break;
       }
     }
-    const prompt = `id:${candidate.id}`;
+    const getSafeString = (val) => typeof val === 'string' ? val : (val && typeof val.id === 'string' ? val.id : '');
+    const candidateId = getSafeString(candidate.id) || getSafeString(candidate.url) || getSafeString(candidate.value) || '';
+    
+    const getSafeDisplay = (c) => {
+      if (typeof c.label === 'string') return c.label;
+      if (typeof c.name === 'string') return c.name;
+      if (typeof c.title === 'string') return c.title;
+      return "Match Option";
+    };
+    
+    const displayName = getSafeDisplay(candidate);
+    const prompt = `${displayName} (id:${candidateId})`;
     sendMessage(prompt, lastFile);
   };
 
 
+
+  const handleCancelProject = async () => {
+    if (!activeProject?.id || !userToken) return;
+    try {
+      await axios.post(
+        `https://tuc-backend-530507298858.us-central1.run.app/projects/${activeProject.id}/cancel`,
+        {},
+        { headers: { Authorization: `Bearer ${userToken}` } }
+      );
+      // Wait a moment then the polling will pick up the cancelled state or error state
+    } catch (e) {
+      console.error("Failed to cancel project", e);
+    }
+  };
 
   const ProcessingMonitor = ({ stage, project }) => {
     const stageConfig = {
@@ -789,9 +993,28 @@ function App() {
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.4 }}
       >
-        <div className="monitor-header">
-          <div className="monitor-dot live" />
-          <span className="monitor-label">LIVE PROCESSING</span>
+        <div className="monitor-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div className="monitor-dot live" />
+            <span className="monitor-label">LIVE PROCESSING</span>
+          </div>
+          <button 
+            onClick={handleCancelProject}
+            style={{
+              background: 'transparent',
+              border: '1px solid rgba(255, 59, 48, 0.5)',
+              color: '#ff3b30',
+              padding: '4px 12px',
+              borderRadius: '12px',
+              fontSize: '12px',
+              cursor: 'pointer',
+              transition: 'all 0.2s ease'
+            }}
+            onMouseOver={(e) => { e.currentTarget.style.background = 'rgba(255, 59, 48, 0.1)'; e.currentTarget.style.borderColor = '#ff3b30'; }}
+            onMouseOut={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = 'rgba(255, 59, 48, 0.5)'; }}
+          >
+            Cancel Order
+          </button>
         </div>
         
         <div className="monitor-body">
@@ -889,14 +1112,13 @@ function App() {
 
         <header className="nav-header">
           <div className="logo-container" onClick={() => setView('landing')}>
-            <div className="logo-icon-wrap">T</div>
+            <img src="/logo.png" className="logo-img" alt="Tuc AI Logo" />
             <span>Tuc AI</span>
           </div>
           <nav className="nav-links">
             <a href="#features" className="nav-link">Features</a>
             <a href="#pipelines" className="nav-link">Pipelines</a>
             <a href="#about" className="nav-link">Aesthetics</a>
-            <span className="nav-link" onClick={() => setView('pricing')} style={{cursor: 'pointer'}}>Pricing</span>
           </nav>
           <div className="nav-actions">
             {user ? (
@@ -904,7 +1126,7 @@ function App() {
             ) : (
               <>
                 <button className="btn btn-ghost" onClick={() => setView('login')}>Login</button>
-                <button className="btn btn-primary" onClick={() => setView('pricing')}>Sign Up</button>
+                <button className="btn btn-primary" onClick={() => setView('signup')}>Sign Up</button>
               </>
             )}
           </div>
@@ -928,7 +1150,7 @@ function App() {
               <button 
                 className="btn btn-primary" 
                 style={{ padding: '1rem 2.5rem', fontSize: '1.1rem', borderRadius: '30px', display: 'inline-flex', alignItems: 'center' }} 
-                onClick={() => setView('pricing')}
+                onClick={() => user ? setView('library') : setView('signup')}
               >
                 Start Editing <ArrowRight size={18} style={{ marginLeft: '8px' }} />
               </button>
@@ -1101,159 +1323,32 @@ function App() {
             </div>
           </div>
         </section>
+        <footer style={{ textAlign: 'center', padding: '40px', borderTop: '1px solid var(--border-color)', color: 'var(--text-secondary)' }}>
+          <p style={{ marginBottom: '16px' }}>&copy; 2026 Tuc AI. All rights reserved.</p>
+          <div style={{ display: 'flex', justifyContent: 'center', gap: '24px' }}>
+            <a href="/privacy" style={{ color: 'inherit', textDecoration: 'none', cursor: 'pointer' }} onClick={(e) => { e.preventDefault(); handleNavigate('privacy'); }}>Privacy Policy</a>
+            <a href="/terms" style={{ color: 'inherit', textDecoration: 'none', cursor: 'pointer' }} onClick={(e) => { e.preventDefault(); handleNavigate('terms'); }}>Terms of Service</a>
+          </div>
+        </footer>
       </div>
     );
   }
 
   // ─────────────────────────────────────────────────────────────
-  // RENDER PRICING VIEW
-  // ─────────────────────────────────────────────────────────────
-  if (view === 'pricing') {
-    return (
-      <div className="pricing-layout">
 
-
-        <button 
-          className="btn btn-outline auth-back-btn" 
-          onClick={() => setView('landing')}
-          style={{ position: 'absolute', top: '2rem', left: '2rem', zIndex: 10 }}
-        >
-          <ArrowLeft size={16} style={{ marginRight: '8px' }} />
-          Back to Home
-        </button>
-
-        <div className="pricing-container">
-          <div className="pricing-header">
-            <h1 className="hero-title" style={{ fontSize: '3rem', marginBottom: '16px' }}>Simple, transparent pricing.</h1>
-            <p className="hero-description" style={{ marginBottom: '32px' }}>Choose the plan that fits your editing workflow.</p>
-            
-            <div className="billing-toggle">
-              <span className={!isYearly ? 'active' : ''}>Monthly</span>
-              <label className="switch">
-                <input type="checkbox" checked={isYearly} onChange={() => setIsYearly(!isYearly)} />
-                <span className="slider round"></span>
-              </label>
-              <span className={isYearly ? 'active' : ''}>Yearly <span className="discount-badge">Save 20%</span></span>
-            </div>
-          </div>
-
-          <div className="pricing-cards">
-            {/* Free Trial */}
-            <div className="pricing-card">
-              <div className="card-header">
-                <h3>7-Day Free Trial</h3>
-                <div className="price">$0</div>
-                <p>7-day limit</p>
-              </div>
-              <ul className="feature-list">
-                <li><Check size={16} /> 1 Video Generation Limit</li>
-                <li><Check size={16} /> Match Highlights</li>
-                <li><Check size={16} /> Player Highlights</li>
-                <li><Check size={16} /> Standard Processing</li>
-                <li><Check size={16} /> 2GB Storage</li>
-                <li><Check size={16} /> 7-day video retention</li>
-                <li><Check size={16} /> Account expires after 7 days</li>
-              </ul>
-              <button 
-                className="btn btn-outline" 
-                onClick={() => setView('signup')} 
-                style={{ width: '100%', marginTop: 'auto' }}
-                disabled={!!user}
-              >
-                {user ? 'Current Plan' : 'Start Free Trial'}
-              </button>
-            </div>
-
-            {/* Basic Plan */}
-            <div className="pricing-card popular">
-              <div className="popular-badge">Most Popular</div>
-              <div className="card-header">
-                <h3>Basic</h3>
-                <div className="price">${isYearly ? '30' : '3'}<span>/{isYearly ? 'yr' : 'mo'}</span></div>
-                <p>For casual fans</p>
-              </div>
-              <ul className="feature-list">
-                <li><Check size={16} /> Unlimited Match Highlights</li>
-                <li><Check size={16} /> 2 Player Highlights / day</li>
-                <li><Check size={16} /> 720p Export Quality</li>
-                <li><Check size={16} /> Standard Processing</li>
-                <li><Check size={16} /> 25GB Storage</li>
-                <li><Check size={16} /> 30-day video retention</li>
-              </ul>
-              <button className="btn btn-primary" onClick={() => handleInitiatePayment('Basic')} style={{ width: '100%', marginTop: 'auto' }}>
-                Get Basic
-              </button>
-            </div>
-
-            {/* Pro Plan */}
-            <div className="pricing-card">
-              <div className="card-header">
-                <h3>Pro</h3>
-                <div className="price">${isYearly ? '75' : '7.50'}<span>/{isYearly ? 'yr' : 'mo'}</span></div>
-                <p>For content creators</p>
-              </div>
-              <ul className="feature-list">
-                <li><Check size={16} /> Unlimited Match Highlights</li>
-                <li><Check size={16} /> Unlimited Player Highlights</li>
-                <li><Check size={16} /> 1080p Export Quality</li>
-                <li><Check size={16} /> Priority Processing</li>
-                <li><Check size={16} /> 100GB Storage</li>
-                <li><Check size={16} /> Unlimited video retention</li>
-              </ul>
-              <button className="btn btn-primary" onClick={() => handleInitiatePayment('Pro')} style={{ width: '100%', marginTop: 'auto' }}>
-                Get Pro
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Payment Method Modal */}
-        {showPaymentModal && (
-          <div className="modal-overlay" onClick={() => setShowPaymentModal(false)}>
-            <div className="modal-content payment-modal" onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-secondary)', padding: '2rem', borderRadius: '16px', maxWidth: '400px', width: '90%', textAlign: 'center' }}>
-              <h2 style={{ marginBottom: '8px' }}>Select Payment Method</h2>
-              <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>Choose how you'd like to pay for the {selectedPlanForPayment} Plan</p>
-              
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <button 
-                  className="btn btn-primary" 
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', fontSize: '1.1rem' }}
-                  onClick={() => handlePaystackCheckout(selectedPlanForPayment)}
-                >
-                  Pay with Paystack (NGN)
-                </button>
-                <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Includes Cards, Bank Transfer, USSD</div>
-                
-                <div style={{ height: '1px', background: 'var(--border-color)', margin: '8px 0' }}></div>
-                
-                <button 
-                  className="btn btn-outline" 
-                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '16px', fontSize: '1.1rem' }}
-                  onClick={() => handleLemonSqueezyCheckout(selectedPlanForPayment)}
-                >
-                  Pay with Lemon Squeezy (USD)
-                </button>
-                <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>Includes Global Cards, Apple Pay, PayPal</div>
-              </div>
-              
-              <button 
-                className="btn btn-outline" 
-                onClick={() => setShowPaymentModal(false)} 
-                style={{ marginTop: '24px', width: '100%' }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
 
   // ─────────────────────────────────────────────────────────────
   // RENDER AUTHENTICATION VIEW (Login / Sign Up)
   // ─────────────────────────────────────────────────────────────
-  if (view === 'login' || view === 'signup') {
+  if (view === 'privacy') {
+    return <Privacy onBack={() => handleNavigate('landing')} />;
+  }
+
+  if (view === 'terms') {
+    return <Terms onBack={() => handleNavigate('landing')} />;
+  }
+
+  if (view === 'login' || view === 'signup' || view === 'otp') {
     return (
       <div className="auth-layout">
         <button className="btn btn-outline auth-back-btn" onClick={() => setView('landing')}>
@@ -1263,31 +1358,171 @@ function App() {
 
         <div className="auth-card">
           <div className="auth-header">
-            <div className="auth-logo-icon">T</div>
-            <h2 className="auth-title">{view === 'login' ? 'Welcome Back' : 'Create Account'}</h2>
+            <img src="/logo.png" className="auth-logo-img" alt="Tuc AI Logo" />
+            <h2 className="auth-title">
+              {view === 'login' ? 'Welcome Back' : view === 'signup' ? 'Create Account' : 'Verify Email'}
+            </h2>
             <p className="auth-subtitle">
-              {view === 'login' ? 'Sign in to access your video editor' : 'Sign up to start editing sports footage'}
+              {view === 'login' ? 'Sign in to access your video editor' : view === 'signup' ? 'Sign up to start editing sports footage' : `Enter the 6-digit code sent to ${authEmail}`}
             </p>
           </div>
 
-          <form onSubmit={(e) => handleAuthSubmit(e, view)} className="auth-form">
-            {view === 'signup' && (
+          {view === 'otp' ? (
+            <form onSubmit={handleOtpSubmit} className="auth-form">
               <div className="form-group">
-                <label className="form-label">Full Name</label>
+                <label className="form-label">6-Digit Code</label>
                 <div className="input-wrapper">
-                  <User className="input-icon" size={18} />
+                  <Lock className="input-icon" size={18} />
                   <input 
                     type="text" 
-                    placeholder="Enter your name" 
+                    placeholder="123456" 
+                    maxLength={6}
                     className="form-input" 
-                    value={authName}
-                    onChange={(e) => setAuthName(e.target.value)}
+                    style={{ letterSpacing: '0.5em', textAlign: 'center', fontSize: '1.25rem', fontWeight: 'bold' }}
+                    value={authOtp}
+                    onChange={(e) => setAuthOtp(e.target.value.replace(/[^0-9]/g, ''))}
                     required
                   />
                 </div>
               </div>
-            )}
+              <button type="submit" className="btn btn-primary auth-submit-btn">
+                Verify & Continue
+              </button>
+              <div className="auth-toggle" style={{ marginTop: '20px' }}>
+                <span className="auth-toggle-link" onClick={() => setView('login')}>Back to Login</span>
+              </div>
+            </form>
+          ) : (
+            <>
+              <form onSubmit={(e) => handleAuthSubmit(e, view)} className="auth-form">
+                {view === 'signup' && (
+                  <div className="form-group">
+                    <label className="form-label">Full Name</label>
+                    <div className="input-wrapper">
+                      <User className="input-icon" size={18} />
+                      <input 
+                        type="text" 
+                        placeholder="Enter your name" 
+                        className="form-input" 
+                        value={authName}
+                        onChange={(e) => setAuthName(e.target.value)}
+                        required
+                      />
+                    </div>
+                  </div>
+                )}
 
+                <div className="form-group">
+                  <label className="form-label">Email Address</label>
+                  <div className="input-wrapper">
+                    <Mail className="input-icon" size={18} />
+                    <input 
+                      type="email" 
+                      placeholder="name@example.com" 
+                      className="form-input" 
+                      value={authEmail}
+                      onChange={(e) => setAuthEmail(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label className="form-label">Password</label>
+                  <div className="input-wrapper">
+                    <Lock className="input-icon" size={18} />
+                    <input 
+                      type="password" 
+                      placeholder="Enter password" 
+                      className="form-input" 
+                      value={authPassword}
+                      onChange={(e) => setAuthPassword(e.target.value)}
+                      required
+                    />
+                  </div>
+                </div>
+
+                {view === 'login' && (
+                  <div style={{ textAlign: 'right', marginTop: '8px' }}>
+                    <span 
+                      className="auth-toggle-link" 
+                      style={{ fontSize: '12px', opacity: 0.8 }}
+                      onClick={() => setView('forgot_password')}
+                    >
+                      Forgot Password?
+                    </span>
+                  </div>
+                )}
+
+                <button type="submit" className="btn btn-primary auth-submit-btn">
+                  {view === 'login' ? 'Sign In' : 'Register'}
+                </button>
+              </form>
+
+              <div className="auth-separator">OR</div>
+
+              <button type="button" className="google-btn" onClick={handleGoogleLogin}>
+                <svg className="google-icon" viewBox="0 0 24 24" width="18" height="18" style={{ marginRight: '10px' }}>
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FBBC05"/>
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/>
+                </svg>
+                Continue with Google
+              </button>
+
+              <div className="auth-toggle">
+                {view === 'login' ? (
+                  <>
+                    Don't have an account? 
+                    <span className="auth-toggle-link" onClick={() => setView('signup')}>Sign Up</span>
+                  </>
+                ) : (
+                  <>
+                    Already have an account? 
+                    <span className="auth-toggle-link" onClick={() => setView('login')}>Log In</span>
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  if (view === 'forgot_password') {
+    return (
+      <div className="auth-layout">
+        <button className="btn btn-outline auth-back-btn" onClick={() => setView('login')}>
+          <ArrowLeft size={16} style={{ marginRight: '8px' }} />
+          Back to Login
+        </button>
+        <div className="auth-card">
+          <div className="auth-header">
+            <img src="/logo.png" className="auth-logo-img" alt="Tuc AI Logo" />
+            <h2 className="auth-title">Reset Password</h2>
+            <p className="auth-subtitle">Enter your email to receive a recovery link.</p>
+          </div>
+          <form className="auth-form" onSubmit={async (e) => {
+            e.preventDefault();
+            setIsResetting(true);
+            setResetError('');
+            try {
+              const res = await axios.post(`https://tuc-backend-530507298858.us-central1.run.app/auth/forgot-password`, {
+                email: resetEmail
+              });
+              if (res.data.status === 'success') {
+                showAlert('Recovery email sent! Please check your inbox.', 'success');
+                setView('login');
+              }
+            } catch (err) {
+              setResetError(err.response?.data?.detail || 'Failed to send recovery email.');
+            } finally {
+              setIsResetting(false);
+            }
+          }}>
+            {resetError && <div className="auth-error">{resetError}</div>}
             <div className="form-group">
               <label className="form-label">Email Address</label>
               <div className="input-wrapper">
@@ -1296,58 +1531,86 @@ function App() {
                   type="email" 
                   placeholder="name@example.com" 
                   className="form-input" 
-                  value={authEmail}
-                  onChange={(e) => setAuthEmail(e.target.value)}
+                  value={resetEmail}
+                  onChange={(e) => setResetEmail(e.target.value)}
                   required
                 />
               </div>
             </div>
+            <button type="submit" className="btn btn-primary auth-submit-btn" disabled={isResetting}>
+              {isResetting ? 'Sending...' : 'Send Recovery Link'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
+  if (view === 'reset_password') {
+    return (
+      <div className="auth-layout">
+        <div className="auth-card">
+          <div className="auth-header">
+            <img src="/logo.png" className="auth-logo-img" alt="Tuc AI Logo" />
+            <h2 className="auth-title">Set New Password</h2>
+            <p className="auth-subtitle">Please enter your new password below.</p>
+          </div>
+          <form className="auth-form" onSubmit={async (e) => {
+            e.preventDefault();
+            setResetError('');
+            if (resetPassword !== resetConfirmPassword) {
+              setResetError("Passwords do not match.");
+              return;
+            }
+            setIsResetting(true);
+            try {
+              const res = await axios.post(`https://tuc-backend-530507298858.us-central1.run.app/auth/reset-password`, {
+                access_token: authResetToken,
+                new_password: resetPassword
+              });
+              if (res.data.status === 'success') {
+                showAlert('Password reset successfully! Please log in.', 'success');
+                handleLogout(); // Clears recovery session and routes to login
+              }
+            } catch (err) {
+              setResetError(err.response?.data?.detail || 'Failed to reset password.');
+            } finally {
+              setIsResetting(false);
+            }
+          }}>
+            {resetError && <div className="auth-error">{resetError}</div>}
             <div className="form-group">
-              <label className="form-label">Password</label>
+              <label className="form-label">New Password</label>
               <div className="input-wrapper">
                 <Lock className="input-icon" size={18} />
                 <input 
                   type="password" 
-                  placeholder="Enter password" 
+                  placeholder="Enter new password" 
                   className="form-input" 
-                  value={authPassword}
-                  onChange={(e) => setAuthPassword(e.target.value)}
+                  value={resetPassword}
+                  onChange={(e) => setResetPassword(e.target.value)}
                   required
                 />
               </div>
             </div>
-
-            <button type="submit" className="btn btn-primary auth-submit-btn">
-              {view === 'login' ? 'Sign In' : 'Register'}
+            <div className="form-group">
+              <label className="form-label">Confirm Password</label>
+              <div className="input-wrapper">
+                <Lock className="input-icon" size={18} />
+                <input 
+                  type="password" 
+                  placeholder="Confirm new password" 
+                  className="form-input" 
+                  value={resetConfirmPassword}
+                  onChange={(e) => setResetConfirmPassword(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+            <button type="submit" className="btn btn-primary auth-submit-btn" disabled={isResetting}>
+              {isResetting ? 'Resetting...' : 'Save New Password'}
             </button>
           </form>
-
-          <div className="auth-separator">OR</div>
-
-          <button type="button" className="google-btn" onClick={handleGoogleLogin}>
-            <svg className="google-icon" viewBox="0 0 24 24" width="18" height="18" style={{ marginRight: '10px' }}>
-              <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-              <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-              <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" fill="#FBBC05"/>
-              <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" fill="#EA4335"/>
-            </svg>
-            Continue with Google
-          </button>
-
-          <div className="auth-toggle">
-            {view === 'login' ? (
-              <>
-                Don't have an account? 
-                <span className="auth-toggle-link" onClick={() => setView('signup')}>Sign Up</span>
-              </>
-            ) : (
-              <>
-                Already have an account? 
-                <span className="auth-toggle-link" onClick={() => setView('login')}>Log In</span>
-              </>
-            )}
-          </div>
         </div>
       </div>
     );
@@ -1361,17 +1624,13 @@ function App() {
       <div className="library-layout" style={{ minHeight: '100vh', background: 'var(--bg-primary)', display: 'flex' }}>
         <aside className="sidebar open" style={{ borderRight: '1px solid var(--border-color)' }}>
           <div className="sidebar-header" style={{ padding: '20px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'center' }}>
-            <div className="logo-icon-wrap" style={{ background: '#fff', color: '#000', marginRight: '12px' }}>T</div>
+            <img src="/logo.png" className="logo-img" alt="Tuc AI Logo" style={{ marginRight: '12px' }} />
             <h2 style={{ fontSize: '1.2rem', margin: 0 }}>Tuc AI</h2>
           </div>
           <div className="sidebar-sessions" style={{ padding: '20px 12px' }}>
             <div className="session-item active" style={{ cursor: 'pointer', marginBottom: '8px' }}>
               <FileVideo size={18} />
               <span className="session-title">My Videos</span>
-            </div>
-            <div className="session-item" style={{ cursor: 'pointer' }} onClick={() => setView('pricing')}>
-              <CreditCard size={18} />
-              <span className="session-title">Billing</span>
             </div>
           </div>
           <div className="sidebar-footer">
@@ -1411,7 +1670,10 @@ function App() {
           {isUploading && (
             <div style={{ background: 'var(--bg-secondary)', padding: '1rem 2rem', borderRadius: '12px', marginBottom: '2rem', border: '1px solid var(--accent)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
-                <span style={{ fontWeight: 'bold', color: 'var(--text-primary)' }}>Uploading to Cloud Workspace...</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                  <span style={{ fontWeight: 'bold', color: 'var(--text-primary)' }}>Uploading to Cloud Workspace...</span>
+                  <button onClick={cancelUpload} style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--error)', border: '1px solid var(--error)', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer', fontSize: '0.8rem' }}>Cancel</button>
+                </div>
                 <span style={{ color: 'var(--text-secondary)' }}>{uploadProgress}% ({uploadSpeed} MB/s) - {timeRemaining}s remaining</span>
               </div>
               <div style={{ height: '8px', background: 'var(--border-color)', borderRadius: '4px', overflow: 'hidden' }}>
@@ -1460,7 +1722,12 @@ function App() {
                       )}
                     </div>
                     <div className="video-info" style={{ padding: '16px', flex: 1, display: 'flex', flexDirection: 'column' }}>
-                      <h4 style={{ margin: '0 0 8px 0', fontSize: '1.1rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{video.filename || 'Untitled Video'}</h4>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <h4 style={{ margin: 0, fontSize: '1.1rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{video.filename || 'Untitled Video'}</h4>
+                        <button onClick={(e) => deleteUploadedVideo(video.name, e)} style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }} title="Delete Upload">
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
                       <button 
                         className="btn btn-primary"
                         style={{ marginTop: 'auto', width: '100%', display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '8px' }}
@@ -1556,7 +1823,7 @@ function App() {
             <button className="sidebar-toggle" onClick={() => setIsSidebarOpen(!isSidebarOpen)}>
               <Menu size={20} />
             </button>
-            <div className="logo-icon-wrap" style={{ background: '#fff', color: '#000' }}>T</div>
+            <img src="/logo.png" className="logo-img" alt="Tuc AI Logo" />
             <h2>Tuc AI Editor</h2>
           </div>
 
@@ -1605,21 +1872,35 @@ function App() {
                   )}
                   
                   <div className="message-text">
-                    {msg.role === 'bot' && msg.isNew ? <TypewriterText text={msg.text} /> : msg.text}
+                    {msg.role === 'bot' && msg.isNew 
+                      ? <TypewriterText text={msg.text} /> 
+                      : (msg.role === 'user' ? msg.text.replace(/\s*\(?id:\d+\)?/g, '').trim() : msg.text)
+                    }
                   </div>
                   
                   {msg.candidates && (
                     <div className="candidates-list">
-                      {msg.candidates.map((cand, idx) => (
-                        <button 
-                          key={idx} 
-                          className="candidate-btn"
-                          onClick={() => handleCandidateSelect(cand)}
-                        >
-                          <List size={14} style={{marginRight: '8px'}} />
-                          <strong>{cand.label || cand.name}</strong> {cand.date ? `— ${cand.date}` : ''}
-                        </button>
-                      ))}
+                      {msg.candidates.map((cand, idx) => {
+                        const getDisplayName = (c) => {
+                          if (typeof c.label === 'string') return c.label;
+                          if (typeof c.name === 'string') return c.name;
+                          if (typeof c.title === 'string') return c.title;
+                          if (typeof c === 'string') return c;
+                          return "Match Option";
+                        };
+                        const getDate = (c) => typeof c.date === 'string' ? c.date : '';
+                        
+                        return (
+                          <button 
+                            key={idx} 
+                            className="candidate-btn"
+                            onClick={() => handleCandidateSelect(cand)}
+                          >
+                            <List size={14} style={{marginRight: '8px'}} />
+                            <strong>{getDisplayName(cand)}</strong> {getDate(cand) ? `— ${getDate(cand)}` : ''}
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                   
@@ -1636,7 +1917,6 @@ function App() {
                             <div 
                               key={idx} 
                               className={`timeline-block type-${(clip.type || clip.moment_type || 'moment').toLowerCase().replace(/\s+/g, '-')}`}
-                              title={clip.reasoning || clip.details || ''}
                               onClick={() => {
                                 const videoEl = document.querySelector('.video-player');
                                 if (videoEl) videoEl.currentTime = clip.final_start || 0;
@@ -1797,7 +2077,61 @@ function App() {
             timeRemaining={timeRemaining}
             uploadError={uploadError}
             onUpload={handleDirectUpload}
+            onCancelUpload={cancelUpload}
+            onDeleteVideo={deleteUploadedVideo}
           />
+        )}
+
+        {customDialog && (
+          <div style={{
+            position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+            background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(8px)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100000
+          }}>
+            <div style={{
+              background: 'var(--bg-secondary)', border: '1px solid var(--border-color)',
+              padding: '28px', borderRadius: '16px', maxWidth: '400px', width: '90%',
+              boxShadow: '0 25px 50px -12px rgba(0,0,0,0.6)', textAlign: 'center',
+              display: 'flex', flexDirection: 'column', alignItems: 'center'
+            }}>
+              <div style={{
+                background: 'rgba(255,255,255,0.05)', borderRadius: '50%', width: '56px', height: '56px',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: '20px',
+                border: '1px solid var(--border-color)'
+              }}>
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+              </div>
+              <p style={{ fontSize: '1.05rem', margin: '0 0 24px 0', color: 'var(--text-primary)', lineHeight: '1.5', fontWeight: '500' }}>
+                {customDialog.message}
+              </p>
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '12px', width: '100%' }}>
+                {customDialog.type === 'confirm' && (
+                  <button 
+                    onClick={customDialog.onCancel}
+                    style={{
+                      flex: 1, padding: '12px', borderRadius: '8px', border: '1px solid var(--border-color)',
+                      background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer',
+                      fontWeight: '600', transition: 'all 0.2s'
+                    }}
+                    onMouseOver={e => e.currentTarget.style.background = 'rgba(255,255,255,0.05)'}
+                    onMouseOut={e => e.currentTarget.style.background = 'transparent'}
+                  >
+                    Cancel
+                  </button>
+                )}
+                <button 
+                  onClick={customDialog.onConfirm}
+                  style={{
+                    flex: 1, padding: '12px', borderRadius: '8px', border: 'none',
+                    background: 'var(--accent)', color: 'white', cursor: 'pointer',
+                    fontWeight: '600', boxShadow: '0 4px 12px rgba(0,0,0,0.2)'
+                  }}
+                >
+                  {customDialog.type === 'confirm' ? 'Confirm' : 'OK'}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

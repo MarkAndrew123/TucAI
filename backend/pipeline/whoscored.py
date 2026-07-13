@@ -21,9 +21,13 @@ def normalize_name(s):
 def search_and_extract_whoscored(match_name: str, year: str, player_target: str) -> list[HighlightMoment]:
     query = f"{match_name} {year}" if year else match_name
     
-    # 0. Check Cache First
     cache_file = "match_url_cache.json"
     whoscored_url = None
+    
+    url_match = re.search(r'id:?\s*(https?://.*whoscored\.com/.*)', query, re.IGNORECASE)
+    if url_match:
+        whoscored_url = url_match.group(1)
+        print(f"\n[DIRECT URL] User provided explicit WhoScored URL: {whoscored_url}")
     if os.path.exists(cache_file):
         try:
             with open(cache_file, "r", encoding="utf-8") as f:
@@ -44,7 +48,7 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
 
     if not whoscored_url:
         import requests
-        api_key = os.getenv("BRAVE_SEARCH_API_KEY", "BSAYP18sgVRsGdqhHveg0qF95MJYaqa")
+        api_key = os.getenv("BRAVE_SEARCH_API_KEY")
         print("\n[1] Calling Brave Search API to find match URL...")
         try:
             res = requests.get(
@@ -103,7 +107,7 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
             else:
                 options_to_show = exact_matches if len(exact_matches) > 1 else candidates
                 print(f"\n  ⚠ Found {len(options_to_show)} matches that fit '{query}'.")
-                candidate_list = [{"title": c["title"], "url": c["url"]} for c in options_to_show]
+                candidate_list = [{"name": c["title"], "id": c["url"]} for c in options_to_show]
                 raise AmbiguousMatchError(
                     f"Found {len(options_to_show)} matches for '{query}'. Which one did you mean?",
                     candidate_list

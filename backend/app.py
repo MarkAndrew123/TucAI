@@ -13,11 +13,36 @@ app = FastAPI(title="Football Highlights API")
 # Setup CORS for the React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allow frontend origin in production
-    allow_credentials=False,
+    allow_origins=[
+        "https://www.trytuc.online",
+        "https://trytuc.online",
+        "http://localhost:5173"
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+def get_sanitized_error_msg(e: Exception) -> str:
+    """Safely sanitizes raw exceptions to prevent leaking internal APIs or logic to the frontend."""
+    if type(e).__name__ in ['AmbiguousMatchError', 'PlayerNotFoundError', 'ValueError', 'HTTPException']:
+        return str(e) if type(e).__name__ != 'HTTPException' else e.detail
+        
+    real_error = str(e)
+    error_lower = real_error.lower()
+    
+    if "httpsconnectionpool" in error_lower or "timeout" in error_lower or "connection" in error_lower:
+        return "The backend service took too long to respond. Please try again."
+    elif "storage" in error_lower or "filenotfound" in error_lower or "no such file" in error_lower:
+        return "We couldn't access your video file. It may have been deleted or corrupted."
+    elif "openai" in error_lower or "azure" in error_lower or "rate limit" in error_lower:
+        return "Our AI analysis service is temporarily overloaded. Please try again."
+    elif "ffmpeg" in error_lower or "cv2" in error_lower or "video" in error_lower:
+        return "We encountered an issue while slicing or rendering your video clips."
+    elif "database" in error_lower or "sql" in error_lower or "firestore" in error_lower:
+        return "A database synchronization error occurred. Your video is safe, please retry."
+    else:
+        return "An unexpected system error occurred during processing. Please try again."
 
 # Setup Rate Limiting Middleware (abuse prevention)
 from fastapi.responses import JSONResponse
@@ -134,6 +159,13 @@ class LoginPayload(BaseModel):
 class VerifyOtpPayload(BaseModel):
     email: str
     token: str
+
+class ForgotPasswordPayload(BaseModel):
+    email: str
+
+class ResetPasswordPayload(BaseModel):
+    access_token: str
+    new_password: str
 
 @app.post("/auth/signup")
 async def auth_signup(payload: SignupPayload):
@@ -282,6 +314,63 @@ async def auth_login(payload: LoginPayload):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/auth/forgot-password")
+async def auth_forgot_password(payload: ForgotPasswordPayload):
+    from config import SUPABASE_URL, SUPABASE_ANON_KEY
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise HTTPException(status_code=500, detail="Supabase connection not configured.")
+        
+    url = f"{SUPABASE_URL}/auth/v1/recover"
+    headers = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Content-Type": "application/json"
+    }
+    body = {
+        "email": payload.email
+    }
+    
+    try:
+        response = requests.post(url, headers=headers, json=body)
+        if response.status_code != 200:
+            res_data = response.json()
+            err_msg = res_data.get("error_description", res_data.get("msg", "Failed to send recovery email."))
+            raise HTTPException(status_code=response.status_code, detail=err_msg)
+            
+        return {"status": "success", "message": "Recovery email sent successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auth/reset-password")
+async def auth_reset_password(payload: ResetPasswordPayload):
+    from config import SUPABASE_URL, SUPABASE_ANON_KEY
+    if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+        raise HTTPException(status_code=500, detail="Supabase connection not configured.")
+        
+    url = f"{SUPABASE_URL}/auth/v1/user"
+    headers = {
+        "apikey": SUPABASE_ANON_KEY,
+        "Authorization": f"Bearer {payload.access_token}",
+        "Content-Type": "application/json"
+    }
+    body = {
+        "password": payload.new_password
+    }
+    
+    try:
+        response = requests.put(url, headers=headers, json=body)
+        if response.status_code != 200:
+            res_data = response.json()
+            err_msg = res_data.get("error_description", res_data.get("msg", "Failed to reset password."))
+            raise HTTPException(status_code=response.status_code, detail=err_msg)
+            
+        return {"status": "success", "message": "Password reset successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/auth/me")
 async def get_current_user(request: Request):
     auth_header = request.headers.get("Authorization")
@@ -333,14 +422,37 @@ async def process_chat(
                 from google.cloud import storage
                 storage_client = storage.Client()
                 bucket = storage_client.bucket("tuc-ai-raw-uploads")
-                blob = bucket.blob(filename)
+                # Ensure the filename has the user_id prefix for GCS lookup
+                gcs_filename = filename
+                if "/" not in gcs_filename:
+                    gcs_filename = f"{user_id}/{filename}"
+                    
+                blob = bucket.blob(gcs_filename)
                 if blob.exists():
-                    video_path = filename  # Set as GCS blob path to be downloaded by worker
+                    video_path = gcs_filename  # Set as GCS blob path to be downloaded by worker
+                    filename = gcs_filename
                 else:
-                    return {
-                        "status": "error",
-                        "message": f"Could not find '{filename}' locally or in cloud storage."
-                    }
+                    # Fallback: unicode characters get mangled inconsistently between GCS and HTTP form requests.
+                    import re
+                    # Extract UUID prefix if present
+                    match = re.search(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}_', filename.split('/')[-1])
+                    if match:
+                        uuid_prefix = match.group(0)
+                        prefix = f"{user_id}/{uuid_prefix}"
+                        blobs = list(bucket.list_blobs(prefix=prefix))
+                        if len(blobs) > 0:
+                            video_path = blobs[0].name
+                            filename = blobs[0].name
+                        else:
+                            return {
+                                "status": "error",
+                                "message": f"Could not find '{filename}' locally or in cloud storage."
+                            }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": f"Could not find '{filename}' locally or in cloud storage."
+                        }
             except Exception as e:
                 # Fallback: if GCS checks fail (e.g. local offline dev), allow path if it looks like a GCS key
                 if "/" in filename:
@@ -376,8 +488,8 @@ async def process_chat(
         if filename:
             import re
             base = os.path.basename(filename)
-            # Remove leading timestamp if present (e.g. 1783608387_)
-            base = re.sub(r'^\d+_', '', base)
+            # Remove leading UUID prefix if present (e.g. 123e4567-e89b-12d3-a456-426614174000_)
+            base = re.sub(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}_', '', base)
             name_without_ext = os.path.splitext(base)[0]
             name_clean = name_without_ext.replace('_', ' ').replace('-', ' ')
             
@@ -415,6 +527,16 @@ async def process_chat(
             known_year=known_year,
             known_player=known_player
         )
+        
+        # INTERCEPT ID SELECTION: If the user just clicked a match candidate, override the LLM
+        if prompt.lower().strip().startswith("id:"):
+            intent_data['match_name'] = prompt.strip()
+            # Inherit intent from the previous message context if possible
+            if known_player:
+                intent_data['intent'] = 'PLAYER_FOCUS'
+            else:
+                intent_data['intent'] = 'GENERAL_HIGHLIGHT'
+            intent_data['chat_response'] = None
         
         # Handle EDIT_COMMAND intent (NLP Editor integration)
         if intent_data.get('intent') == 'EDIT_COMMAND':
@@ -482,12 +604,37 @@ async def process_chat(
                                 "prompt": prompt
                             }
                             
-                            requests.post(
-                                f"{worker_url}/internal/worker",
-                                json=worker_payload,
-                                headers={"X-Worker-Secret": worker_secret},
-                                timeout=10
-                            )
+                            def dispatch_edit_to_cloud_tasks():
+                                try:
+                                    from google.cloud import tasks_v2
+                                    import json
+                                    project = os.getenv("GOOGLE_CLOUD_PROJECT", "tuc-ai-prod")
+                                    location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+                                    queue = os.getenv("CLOUD_TASKS_QUEUE", "worker-queue")
+                                    client = tasks_v2.CloudTasksClient()
+                                    parent = client.queue_path(project, location, queue)
+                                    task = {
+                                        "http_request": {
+                                            "http_method": tasks_v2.HttpMethod.POST,
+                                            "url": f"{worker_url}/internal/worker",
+                                            "headers": {
+                                                "Content-Type": "application/json",
+                                                "X-Worker-Secret": worker_secret
+                                            },
+                                            "body": json.dumps(worker_payload).encode()
+                                        }
+                                    }
+                                    client.create_task(request={"parent": parent, "task": task})
+                                except Exception as e:
+                                    print(f"Cloud Tasks dispatch failed for edit: {e}. Falling back to BackgroundTasks.")
+                                    def call_worker():
+                                        try:
+                                            requests.post(f"{worker_url}/internal/worker", json=worker_payload, headers={"X-Worker-Secret": worker_secret}, timeout=300)
+                                        except:
+                                            pass
+                                    background_tasks.add_task(call_worker)
+                                    
+                            dispatch_edit_to_cloud_tasks()
                             
                             return {
                                 "status": "processing",
@@ -500,7 +647,7 @@ async def process_chat(
                             import traceback
                             traceback.print_exc()
                             intent_data['intent'] = 'CONVERSATION'
-                            intent_data['chat_response'] = f"Failed to apply the edit: {str(e)}"
+                            intent_data['chat_response'] = f"Failed to apply the edit: {get_sanitized_error_msg(e)}"
         
         # Hard safety stop: If AI router hallucinations try to force processing without a video or match name
         if intent_data.get('intent') != 'CONVERSATION':
@@ -540,8 +687,8 @@ async def process_chat(
         project_id = str(uuid.uuid4())
 
         import billing
-        is_player_focus = intent_data.get('intent') == "PLAYER_FOCUS"
-        can_process, block_reason = billing.check_can_process_request(user_id, is_player_focus, token)
+        is_edit = intent_data.get('intent') == "EDIT_COMMAND"
+        can_process, block_reason = billing.check_can_process_request(user_id, is_edit, token)
         if not can_process:
             msg = "You have exhausted your generation limits. Please upgrade to Pro!"
             database.add_message(active_session_id, {"role": "assistant", "content": msg, "status": "error"})
@@ -567,34 +714,44 @@ async def process_chat(
             "session_id": active_session_id
         }
         
-        def dispatch_worker():
+        def dispatch_to_cloud_tasks():
             try:
-                print(f"Dispatching to worker API for project {project_id}...")
-                resp = requests.post(
-                    f"{worker_url}/internal/worker",
-                    json=worker_payload,
-                    headers={"X-Worker-Secret": worker_secret},
-                    timeout=3600  # 1 hour timeout keeps connection open, preventing Cloud Run scale-to-zero
-                )
-                if resp.status_code != 200:
-                    print(f"Worker returned {resp.status_code}: {resp.text}")
-                else:
-                    print(f"Worker API successfully completed for project {project_id}")
+                from google.cloud import tasks_v2
+                import os, json
+                
+                project = os.getenv("GOOGLE_CLOUD_PROJECT", "tuc-ai-prod")
+                location = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+                queue = os.getenv("CLOUD_TASKS_QUEUE", "worker-queue")
+                
+                client = tasks_v2.CloudTasksClient()
+                parent = client.queue_path(project, location, queue)
+                
+                task = {
+                    "http_request": {
+                        "http_method": tasks_v2.HttpMethod.POST,
+                        "url": f"{worker_url}/internal/worker",
+                        "headers": {
+                            "Content-Type": "application/json",
+                            "X-Worker-Secret": worker_secret
+                        },
+                        "body": json.dumps(worker_payload).encode()
+                    }
+                }
+                
+                response = client.create_task(request={"parent": parent, "task": task})
+                print(f"Task successfully dispatched to Cloud Tasks: {response.name}")
+                
             except Exception as e:
-                print(f"Failed or timed out dispatching to worker API: {e}. Falling back to in-process background task.")
-                # We can't use FastAPI background_tasks here because we're in a separate thread.
-                # Since the worker might be completely down, we'll try running the pipeline synchronously 
-                # (but in this thread, so it won't block the web server, though Cloud Run might throttle it).
-                try:
-                    run_pipeline_with_error_handling(
-                        pipeline, video_path, prompt,
-                        intent_data=intent_data, user_id=user_id, project_id=project_id, token=token
-                    )
-                except Exception as inner_e:
-                    print(f"Fallback pipeline failed: {inner_e}")
-                    
-        # Start the background thread
-        threading.Thread(target=dispatch_worker, daemon=True).start()
+                print(f"Cloud Tasks dispatch failed: {e}. Falling back to immediate background task (not recommended for production).")
+                # Fallback using standard background tasks instead of a daemon thread
+                background_tasks.add_task(
+                    run_pipeline_with_error_handling,
+                    pipeline, video_path, prompt,
+                    intent_data=intent_data, user_id=user_id, project_id=project_id, token=token
+                )
+
+        # Dispatch the task to the queue immediately
+        dispatch_to_cloud_tasks()
         msg = "Processing your highlight reel..."
         database.add_message(active_session_id, {"role": "assistant", "content": msg, "project_id": project_id, "status": "processing"})
         
@@ -634,7 +791,7 @@ async def process_chat(
         traceback.print_exc()
         return {
             "status": "error",
-            "message": f"An error occurred: {str(e)}"
+            "message": f"An error occurred: {get_sanitized_error_msg(e)}"
         }
 
 def run_pipeline_with_error_handling(pipeline_obj, video_path, prompt, intent_data, user_id, project_id, token):
@@ -747,8 +904,9 @@ async def get_project_status(project_id: str, request: Request):
     if project.get("status") == "complete" and project.get("video_url"):
         project["video_url"] = get_signed_video_url(project, user_id, token)
         
-    # Strip sensitive error log before sending it to the client for security
-    if "last_error_log" in project:
+    # Strip sensitive error log before sending it to the client for security,
+    # but ONLY if it's an actual error. If it's a conversational pushback, we need the JSON data!
+    if "last_error_log" in project and project.get("status") != "conversational_pushback":
         project["last_error_log"] = "An unexpected error occurred while processing your video."
         
     return project
@@ -967,11 +1125,11 @@ async def get_session_details(session_id: str, request: Request):
                 database.db.collection("sessions").document(session_id).collection("messages").document(msg["id"]).update(update_payload)
             elif project["status"] == "conversational_pushback":
                 import json
-                msg["status"] = "error"
+                msg["status"] = "multiple_matches"
                 try:
                     err_data = json.loads(project.get("last_error_log", "{}"))
                     msg["content"] = err_data.get("message", "I need clarification.")
-                    msg["candidates"] = [{"id": c, "label": c} for c in err_data.get("candidates", [])]
+                    msg["candidates"] = [{"id": c, "label": c} if isinstance(c, str) else c for c in err_data.get("candidates", [])]
                 except:
                     msg["content"] = project.get("last_error_log", "I need clarification.")
                 msg["text"] = msg["content"]
@@ -1070,8 +1228,11 @@ async def generate_upload_url(request: Request):
         raise HTTPException(status_code=400, detail="Missing filename")
         
     bucket_name = "tuc-ai-raw-uploads"
-    safe_filename = filename.replace(" ", "_")
-    blob_name = f"{user_info.get('id')}/{int(datetime.datetime.now().timestamp())}_{safe_filename}"
+    import re
+    import uuid
+    safe_filename = re.sub(r'[^\x00-\x7F]+', '_', filename.replace(" ", "_"))
+    unique_id = str(uuid.uuid4())
+    blob_name = f"{user_info.get('id')}/{unique_id}_{safe_filename}"
 
     try:
         from google.cloud import storage
@@ -1307,28 +1468,55 @@ def internal_worker(request: Request, payload: WorkerPayload):
                 intent_data=intent_data_parsed
             )
         
+        import billing
+        is_edit = payload.mode == "edit" or intent_data_parsed.get('intent') == "EDIT_COMMAND"
+        billing.record_successful_generation(payload.user_id, is_edit, payload.token)
+        
         print(f"\n=== [DEDICATED WORKER] FINISHED {payload.project_id} ===\n")
         return {"status": "done"}
-    except espn.AmbiguousMatchError as e:
-        import database
-        if payload.session_id:
-            database.add_message(payload.session_id, {"role": "assistant", "content": "I found multiple matches that fit that description. Which one did you mean?", "candidates": e.candidates, "status": "multiple_matches"})
-        # We must set status to 'conversational_pushback' so the frontend elegantly stops the spinner and shows the chat without a red error toast
-        database.update_project_status(payload.project_id, 'conversational_pushback', last_error_log="Multiple matches found. See chat for details.", token=payload.token)
-        return {"status": "multiple_matches"}
-    except PlayerNotFoundError as e:
-        import database
-        if payload.session_id:
-            database.add_message(payload.session_id, {"role": "assistant", "content": str(e), "status": "missing_info"})
-        # We must set status to 'conversational_pushback' so the frontend elegantly stops the spinner and shows the chat without a red error toast
-        database.update_project_status(payload.project_id, 'conversational_pushback', last_error_log=str(e), token=payload.token)
-        return {"status": "missing_info"}
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        import database
-        database.update_project_status(payload.project_id, 'error', last_error_log=str(e), token=payload.token)
-        return {"status": "error", "message": str(e)}
+        if type(e).__name__ not in ['AmbiguousMatchError', 'PlayerNotFoundError']:
+            import traceback
+            traceback.print_exc()
+        
+        # Manually catch AmbiguousMatchError and PlayerNotFoundError to avoid module import mismatch issues
+        if type(e).__name__ == 'AmbiguousMatchError':
+            import database
+            import json
+            
+            error_data = {
+                "message": str(e),
+                "candidates": getattr(e, 'candidates', [])
+            }
+            if payload.session_id:
+                database.add_message(payload.session_id, {"role": "assistant", "content": "I found multiple matches that fit that description. Which one did you mean?", "candidates": getattr(e, 'candidates', []), "status": "multiple_matches"})
+            
+            # Use the JSON format for last_error_log so the frontend can parse candidates!
+            database.update_project_status(payload.project_id, 'conversational_pushback', last_error_log=json.dumps(error_data), token=payload.token)
+            return {"status": "multiple_matches"}
+            
+        elif type(e).__name__ == 'PlayerNotFoundError':
+            import database
+            if payload.session_id:
+                database.add_message(payload.session_id, {"role": "assistant", "content": str(e), "status": "missing_info"})
+            database.update_project_status(payload.project_id, 'conversational_pushback', last_error_log=str(e), token=payload.token)
+            return {"status": "missing_info"}
+            
+        else:
+            import database
+            import traceback
+            
+            # 1. Securely log the actual raw error to Google Cloud Logging
+            real_error = str(e)
+            print(f"CRITICAL WORKER ERROR [{payload.project_id}]: {real_error}")
+            traceback.print_exc()
+            
+            # 2. Map the raw error to a safe, specific, non-revealing message
+            sanitized_msg = get_sanitized_error_msg(e)
+                
+            # 3. Push the sanitized message to the frontend via Firestore
+            database.update_project_status(payload.project_id, 'error', last_error_log=sanitized_msg, token=payload.token)
+            return {"status": "error", "message": sanitized_msg}
 
 
 if __name__ == "__main__":

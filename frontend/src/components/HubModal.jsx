@@ -17,7 +17,9 @@ const HubModal = ({
   uploadSpeed,
   timeRemaining,
   uploadError,
-  onUpload
+  onUpload,
+  onCancelUpload,
+  onDeleteVideo
 }) => {
   const [tab, setTab] = useState('uploads');
   const [videoErrorMsg, setVideoErrorMsg] = useState(null);
@@ -159,7 +161,10 @@ const HubModal = ({
               {isUploading && (
                 <div style={{ background: 'var(--bg-secondary)', padding: '1.5rem', borderRadius: '12px', marginBottom: '2rem', border: '1px solid var(--accent)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '0.9rem' }}>
-                    <span style={{ fontWeight: 'bold', color: 'var(--text-primary)' }}>Uploading to Cloud Workspace...</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                      <span style={{ fontWeight: 'bold', color: 'var(--text-primary)' }}>Uploading to Cloud Workspace...</span>
+                      <button onClick={onCancelUpload} style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--error)', border: '1px solid var(--error)', borderRadius: '4px', padding: '0.2rem 0.5rem', cursor: 'pointer', fontSize: '0.8rem' }}>Cancel</button>
+                    </div>
                     <span style={{ color: 'var(--text-secondary)' }}>{uploadProgress}% ({uploadSpeed} MB/s) - {timeRemaining}s remaining</span>
                   </div>
                   <div style={{ height: '8px', background: 'var(--border-color)', borderRadius: '4px', overflow: 'hidden' }}>
@@ -207,9 +212,20 @@ const HubModal = ({
                         <Video size={40} style={{ color: 'var(--accent)', filter: 'drop-shadow(0 0 8px var(--accent))', opacity: 0.8 }} />
                         <span style={{ fontSize: '0.75rem', fontWeight: '500', letterSpacing: '0.05em', textTransform: 'uppercase', opacity: 0.6 }}>Video Upload</span>
                       </div>
-                      <h3 style={{ margin: '0 0 8px 0', fontSize: '1rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                        {getCleanFilename(vid.name || vid)}
-                      </h3>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '8px' }}>
+                        <h3 style={{ margin: 0, fontSize: '1rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1 }}>
+                          {getCleanFilename(vid.name || vid)}
+                        </h3>
+                        {onDeleteVideo && (
+                          <button 
+                            onClick={(e) => onDeleteVideo(vid.name || vid, e)} 
+                            style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', marginLeft: '8px' }} 
+                            title="Delete Upload"
+                          >
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>
+                          </button>
+                        )}
+                      </div>
                       <p style={{ margin: '0 0 16px 0', fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
                         {((vid.size || 0) / (1024*1024)).toFixed(1)} MB • {vid.created_at ? new Date(vid.created_at).toLocaleDateString() : 'N/A'}
                       </p>
@@ -297,97 +313,7 @@ const HubModal = ({
             </div>
           )}
 
-          {tab === 'billing' && (
-            <div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' }}>
-                <h1 style={{ fontSize: '2rem', margin: 0 }}>Pricing Plans</h1>
-                
-                {/* Billing Cycle Toggle */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', background: 'var(--bg-secondary)', padding: '6px 16px', borderRadius: '20px', border: '1px solid var(--border-color)' }}>
-                  <span style={{ fontSize: '0.9rem', color: !isYearly ? 'var(--text-primary)' : 'var(--text-secondary)', fontWeight: !isYearly ? '600' : 'normal' }}>Monthly</span>
-                  <label className="switch" style={{ position: 'relative', display: 'inline-block', width: '36px', height: '20px', margin: 0 }}>
-                    <input type="checkbox" checked={isYearly} onChange={() => setIsYearly(!isYearly)} style={{ opacity: 0, width: 0, height: 0 }} />
-                    <span className="slider round" style={{ borderRadius: '20px' }}></span>
-                  </label>
-                  <span style={{ fontSize: '0.9rem', color: isYearly ? 'var(--text-primary)' : 'var(--text-secondary)', fontWeight: isYearly ? '600' : 'normal', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    Yearly
-                    <span style={{ background: 'var(--accent)', color: '#fff', fontSize: '0.7rem', padding: '1px 6px', borderRadius: '10px', fontWeight: 'bold' }}>-20%</span>
-                  </span>
-                </div>
-              </div>
 
-              <div style={{ display: 'flex', gap: '24px', flexWrap: 'wrap' }}>
-                
-                {/* Free Trial */}
-                <div style={{ flex: '1', minWidth: '250px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column' }}>
-                  <h3 style={{ margin: '0 0 16px 0', fontSize: '1.25rem' }}>7-Day Free Trial</h3>
-                  <div style={{ fontSize: '2.5rem', fontWeight: 'bold', marginBottom: '24px' }}>$0<span style={{fontSize: '1rem', color: 'var(--text-secondary)'}}>/7 days</span></div>
-                  <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 32px 0', display: 'flex', flexDirection: 'column', gap: '12px', color: 'var(--text-secondary)' }}>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> 1 Video Generation Limit</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> 2GB Storage</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> 7-day video retention</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> Account expires after 7 days</li>
-                  </ul>
-                  <button disabled style={{ marginTop: 'auto', width: '100%', padding: '12px', background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-secondary)', borderRadius: '8px' }}>
-                    {(!user || user?.plan_tier === 'FREE') ? 'Current Plan' : 'Free Trial'}
-                  </button>
-                </div>
-
-                {/* Basic */}
-                <div style={{ flex: '1', minWidth: '250px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column' }}>
-                  <h3 style={{ margin: '0 0 16px 0', fontSize: '1.25rem' }}>Basic</h3>
-                  <div style={{ fontSize: '2.5rem', fontWeight: 'bold', marginBottom: '24px' }}>
-                    ${isYearly ? '30' : '3'}
-                    <span style={{fontSize: '1rem', color: 'var(--text-secondary)'}}>/{isYearly ? 'yr' : 'mo'}</span>
-                  </div>
-                  <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 32px 0', display: 'flex', flexDirection: 'column', gap: '12px', color: 'var(--text-secondary)' }}>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> Unlimited Match Highlights</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> 2 Player Highlights/day</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> 25GB Storage</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> 30-day video retention</li>
-                  </ul>
-                  {user?.plan_tier === 'BASIC' ? (
-                    <button disabled style={{ marginTop: 'auto', width: '100%', padding: '12px', background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-secondary)', borderRadius: '8px' }}>
-                      Current Plan
-                    </button>
-                  ) : user?.plan_tier === 'PRO' ? (
-                    <button disabled style={{ marginTop: 'auto', width: '100%', padding: '12px', background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-secondary)', borderRadius: '8px' }}>
-                      Basic Plan
-                    </button>
-                  ) : (
-                    <button onClick={() => onInitiatePayment('basic')} style={{ marginTop: 'auto', width: '100%', padding: '12px', background: 'var(--accent)', border: 'none', color: '#fff', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>
-                      Upgrade to Basic
-                    </button>
-                  )}
-                </div>
-
-                {/* Pro */}
-                <div style={{ flex: '1', minWidth: '250px', background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: '16px', padding: '32px', display: 'flex', flexDirection: 'column' }}>
-                  <h3 style={{ margin: '0 0 16px 0', fontSize: '1.25rem' }}>Pro</h3>
-                  <div style={{ fontSize: '2.5rem', fontWeight: 'bold', marginBottom: '24px' }}>
-                    ${isYearly ? '75' : '7.50'}
-                    <span style={{fontSize: '1rem', color: 'var(--text-secondary)'}}>/{isYearly ? 'yr' : 'mo'}</span>
-                  </div>
-                  <ul style={{ listStyle: 'none', padding: 0, margin: '0 0 32px 0', display: 'flex', flexDirection: 'column', gap: '12px', color: 'var(--text-secondary)' }}>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> Unlimited Match Highlights</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> Unlimited Player Highlights</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> 100GB Storage</li>
-                    <li style={{ display: 'flex', alignItems: 'center', gap: '8px' }}><Check size={16} color="var(--accent)"/> Unlimited retention</li>
-                  </ul>
-                  {user?.plan_tier === 'PRO' ? (
-                    <button disabled style={{ marginTop: 'auto', width: '100%', padding: '12px', background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-secondary)', borderRadius: '8px' }}>
-                      Current Plan
-                    </button>
-                  ) : (
-                    <button onClick={() => onInitiatePayment('pro')} style={{ marginTop: 'auto', width: '100%', padding: '12px', background: 'var(--accent)', border: 'none', color: '#fff', borderRadius: '8px', cursor: 'pointer', fontWeight: 'bold' }}>
-                      Upgrade to Pro
-                    </button>
-                  )}
-                </div>
-
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

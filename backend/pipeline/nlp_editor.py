@@ -42,20 +42,19 @@ def process_edit_command(prompt: str, timeline_data: list = None) -> tuple[str, 
     The timeline JSON contains blocks with `id`, `start` (timestamp in the ORIGINAL full match video), `end` (in the ORIGINAL full match), and `vision_analysis`.
     CRITICALLY: It also contains `rendered_start_time` and `rendered_end_time`. These represent exactly where this clip appears in the FINAL EXPORTED HIGHLIGHT REEL that the user is currently watching.
     
-    When a user says "cut from 0:23 to 1:45" or "remove the clip at 1:10", they are almost always referring to the `rendered_start_time` (the final video they are watching), NOT the original full match!
+    Your job is to translate the user's request into a list of specific mutations to apply to the timeline.
     
-    Your job is to:
-    1. Read the user's request.
-    2. Figure out if they are referring to the final rendered video timestamps OR the original match.
-    3. If they want to REMOVE a clip entirely, DELETE that entire JSON object from the array.
-    4. If they want to TRIM/SHORTEN a clip, calculate the new exact original `start` and `end` floats that correspond to their request, and modify them.
-    5. Output the UPDATED full timeline JSON. Do not include the `rendered_` helper keys in your output.
+    If the user says "remove the first 3 minutes of the video", they mean the rendered highlight reel! You must find ALL clips where `rendered_start_time` < 180.0, and issue a "remove" action for each of their IDs.
+    If they say "add 30 seconds to the beginning of the first goal", you find the clip representing the goal, and issue an "update" action with a new `start` value that is 30 seconds EARLIER than its current `start` (e.g., if start is 429, new_start is 399).
     
-    Rules:
-    1. To remove a clip, completely omit it from the JSON array. Do NOT set its timestamps to 0.0.
-    2. To trim a clip, ONLY update the `start` and `end` floats.
-    3. Do NOT change IDs, file paths, or the vision_analysis text of the clips you keep.
-    4. Return ONLY valid JSON representing the entire updated timeline array. Do not wrap in markdown or backticks.
+    You must output ONLY a valid JSON object containing a "mutations" array. Do not output anything else.
+    Format:
+    {
+      "mutations": [
+        {"action": "remove", "id": "moment_0_clip_0"},
+        {"action": "update", "id": "moment_3_clip_0", "new_start": 399, "new_end": 444}
+      ]
+    }
     """
     
     user_content = f"""
@@ -78,16 +77,34 @@ def process_edit_command(prompt: str, timeline_data: list = None) -> tuple[str, 
         
         response_text = response.choices[0].message.content.strip()
         
-        # Try to find JSON array in the response text
+        # Try to extract JSON object
         import re
-        json_match = re.search(r'\[.*\]', response_text, re.DOTALL)
+        json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
         if json_match:
             response_text = json_match.group(0)
             
         try:
-            updated_timeline = json.loads(response_text)
+            mutations_data = json.loads(response_text)
+            mutations = mutations_data.get("mutations", [])
         except json.JSONDecodeError:
-            return "Sorry, I couldn't understand how to apply that edit to the timeline. Could you be more specific about what you want to change?", timeline_data
+            return "Sorry, I couldn't understand how to apply that edit. Could you be more specific?", timeline_data
+            
+        # Apply mutations deterministically
+        updated_timeline = []
+        for clip in timeline_data:
+            clip_id = clip['id']
+            # Check if this clip has a mutation
+            mutation = next((m for m in mutations if m['id'] == clip_id), None)
+            
+            if mutation:
+                if mutation['action'] == 'remove':
+                    continue # Skip adding it to the new timeline
+                elif mutation['action'] == 'update':
+                    clip['start'] = mutation.get('new_start', clip['start'])
+                    clip['end'] = mutation.get('new_end', clip['end'])
+                    updated_timeline.append(clip)
+            else:
+                updated_timeline.append(clip)
         
         # Save it locally for dev fallback
         try:
@@ -97,7 +114,7 @@ def process_edit_command(prompt: str, timeline_data: list = None) -> tuple[str, 
         except Exception:
             pass
             
-        return f"Successfully processed edit: '{prompt}'. The timeline has been updated based on your instructions!", updated_timeline
+        return f"Successfully processed edit: '{prompt}'.", updated_timeline
         
     except Exception as e:
         print(f"NLP Editor Error: {e}")
