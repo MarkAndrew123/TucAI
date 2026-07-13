@@ -38,6 +38,16 @@ def check_can_process_request(user_id: str, is_edit: bool, token: str = None) ->
             return False, "You've reached your limit of 1 new video generation per day. Please try again tomorrow!"
 
     # 3. Check 2GB Storage Limit
+    return check_storage_limit(user_id)
+
+def check_storage_limit(user_id: str) -> tuple[bool, str]:
+    """
+    Checks if the user has exceeded their 2GB storage limit.
+    Returns (True, "") if allowed, or (False, "reason") if blocked.
+    """
+    if not user_id:
+        return True, ""
+
     try:
         from google.cloud import storage
         storage_client = storage.Client()

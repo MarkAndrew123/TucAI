@@ -1220,6 +1220,12 @@ async def generate_upload_url(request: Request):
     if not user_info:
         raise HTTPException(status_code=401, detail="Invalid token.")
 
+    import billing
+    user_id = user_info.get("id")
+    can_upload, block_reason = billing.check_storage_limit(user_id)
+    if not can_upload:
+        raise HTTPException(status_code=403, detail=block_reason)
+
     data = await request.json()
     filename = data.get("filename")
     content_type = data.get("contentType", "video/mp4")
@@ -1281,7 +1287,12 @@ async def upload_local_video(request: Request, file: UploadFile = File(...)):
     if not user_info:
         raise HTTPException(status_code=401, detail="Invalid token.")
         
+    import billing
     user_id = user_info.get("id")
+    can_upload, block_reason = billing.check_storage_limit(user_id)
+    if not can_upload:
+        raise HTTPException(status_code=403, detail=block_reason)
+        
     user_upload_dir = os.path.join(UPLOAD_DIR, user_id)
     os.makedirs(user_upload_dir, exist_ok=True)
     
