@@ -215,9 +215,17 @@ def validate_match(game_id: str, target_score: str = None, target_year: str = No
         # Check teams if provided
         if team_tokens:
             match_name_lower = match_name.lower()
+            aliases = {
+                "usa": "united states",
+                "us": "united states",
+                "uk": "england",
+                "uae": "united arab emirates"
+            }
             for team in team_tokens:
-                # Basic sub-string check
-                if team.lower() not in match_name_lower:
+                team_lower = team.lower()
+                alias = aliases.get(team_lower, team_lower)
+                # Check both the raw token and its alias
+                if team_lower not in match_name_lower and alias not in match_name_lower:
                     print(f"    ID {game_id}: {match_name} {scores[0]}-{scores[1]} — team mismatch ('{team}' missing) ✗")
                     return False, None, None
         
