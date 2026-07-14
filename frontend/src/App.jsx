@@ -90,6 +90,7 @@ function App() {
   const [authPassword, setAuthPassword] = useState('');
   const [authName, setAuthName] = useState('');
   const [authOtp, setAuthOtp] = useState('');
+  const [authError, setAuthError] = useState('');
 
   // App Editor Layout State
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -616,8 +617,9 @@ function App() {
   // Production authentication logic connecting to backend
   const handleAuthSubmit = async (e, type) => {
     e.preventDefault();
+    setAuthError('');
     if (!authEmail || !authPassword || (type === 'signup' && !authName)) {
-      showAlert('Please fill out all fields.');
+      setAuthError('Please fill out all fields.');
       return;
     }
     
@@ -650,18 +652,19 @@ function App() {
         showAlert('Signup successful! Please check your email for the 6-digit OTP code.');
         setView('otp');
       } else {
-        showAlert(response.data.message || 'Authentication failed.');
+        setAuthError(response.data.message || 'Authentication failed.');
       }
     } catch (error) {
       console.error(error);
-      showAlert(error.response?.data?.detail || error.message || 'Authentication error.');
+      setAuthError(error.response?.data?.detail || error.message || 'Authentication error.');
     }
   };
 
   const handleOtpSubmit = async (e) => {
     e.preventDefault();
+    setAuthError('');
     if (!authOtp || !authEmail) {
-      showAlert('Please enter the 6-digit code sent to your email.');
+      setAuthError('Please enter the 6-digit code sent to your email.');
       return;
     }
 
@@ -679,11 +682,11 @@ function App() {
         setAuthPassword(''); // Clear password for security
         setView('login');
       } else {
-        showAlert(response.data.message || 'Invalid or expired OTP.');
+        setAuthError(response.data.message || 'Invalid or expired OTP.');
       }
     } catch (error) {
       console.error(error);
-      showAlert(error.response?.data?.detail || error.message || 'Verification error.');
+      setAuthError(error.response?.data?.detail || error.message || 'Verification error.');
     }
   };
 
@@ -1366,6 +1369,8 @@ function App() {
               {view === 'login' ? 'Sign in to access your video editor' : view === 'signup' ? 'Sign up to start editing sports footage' : `Enter the 6-digit code sent to ${authEmail}`}
             </p>
           </div>
+          
+          {authError && <div className="auth-error">{authError}</div>}
 
           {view === 'otp' ? (
             <form onSubmit={handleOtpSubmit} className="auth-form">
@@ -1874,7 +1879,7 @@ function App() {
                   <div className="message-text">
                     {msg.role === 'bot' && msg.isNew 
                       ? <TypewriterText text={msg.text} /> 
-                      : (msg.role === 'user' ? msg.text.replace(/\s*\(?id:\d+\)?/g, '').trim() : msg.text)
+                      : (msg.role === 'user' ? msg.text.replace(/\s*\(?id:[^)]+\)?/g, '').trim() : msg.text)
                     }
                   </div>
                   
