@@ -43,8 +43,10 @@ class HighlightPipeline:
         else:
             print("  [STRATEGY] General Highlight -> Using ESPN Match Locator")
             # 1. Search match via NLP match locator
-            # Pass the original prompt to preserve the embedded (id:XXXXXX) from the UI disambiguation
-            game_id = match_locator.locate_exact_match(prompt)
+            match_name = intent_data.get('match_name') or prompt
+            year = intent_data.get('year') or ""
+            search_query = f"{match_name} {year}".strip()
+            game_id = match_locator.locate_exact_match(search_query)
             # 2. Get moments from ESPN
             moments = espn.fetch_match_details(game_id)
             
