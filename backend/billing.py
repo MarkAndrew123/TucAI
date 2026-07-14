@@ -28,7 +28,7 @@ def check_can_process_request(user_id: str, is_edit: bool, token: str = None) ->
         sub["free_videos_used"] = 0
 
     # 2. Check Quotas
-    plan_type = sub.get("plan_type", "free")
+    plan_type = sub.get("plan_tier", "FREE").lower()
     if plan_type == "free":
         if is_edit:
             # Edit Quota
@@ -52,7 +52,7 @@ def check_storage_limit(user_id: str, plan_type: str = None) -> tuple[bool, str]
         
     if plan_type is None:
         sub = get_user_subscription(user_id)
-        plan_type = sub.get("plan_type", "free")
+        plan_type = sub.get("plan_tier", "FREE").lower()
         
     # Define storage limits per plan (in bytes)
     limits_gb = {
