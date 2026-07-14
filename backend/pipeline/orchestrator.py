@@ -32,20 +32,26 @@ class HighlightPipeline:
         if is_player_focus:
             print("  [STRATEGY] Player Focus -> Using WhoScored Subprocess Scraper")
             from . import whoscored
-            match_name = intent_data.get('match_name') or prompt
+            import re as _re
+            raw_match_name = intent_data.get('match_name') or prompt
+            # Strip the embedded (id:...) tag so validation/cache keys stay clean,
+            # but pass it through the query so whoscored's URL regex can still extract it.
+            clean_match_name = _re.sub(r'\s*\(?id:[^)]+\)?', '', raw_match_name).strip()
+            # Build the whoscored query with the raw name (contains URL for direct extraction)
             year = intent_data.get('year')
             player = intent_data.get('player_name')
-            moments = whoscored.fetch_player_touches(match_name, year, player)
+            moments = whoscored.fetch_player_touches(raw_match_name, year, player, clean_match_name=clean_match_name)
             
             # Sub-filter: only process major events with Vision AI if requested, others just dumb cut
             # We'll let vision_reasoning decide if it wants to analyze based on event_type.
             
         else:
             print("  [STRATEGY] General Highlight -> Using ESPN Match Locator")
+            import re as _re
             # 1. Search match via NLP match locator
-            match_name = intent_data.get('match_name') or prompt
+            raw_match_name = intent_data.get('match_name') or prompt
             year = intent_data.get('year') or ""
-            search_query = f"{match_name} {year}".strip()
+            search_query = f"{raw_match_name} {year}".strip()
             game_id = match_locator.locate_exact_match(search_query)
             # 2. Get moments from ESPN
             moments = espn.fetch_match_details(game_id)

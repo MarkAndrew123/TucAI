@@ -18,7 +18,9 @@ def normalize_name(s):
     s = re.sub(r'[^\w\s]', ' ', s)
     return ' '.join(s.split())
 
-def search_and_extract_whoscored(match_name: str, year: str, player_target: str) -> list[HighlightMoment]:
+def search_and_extract_whoscored(match_name: str, year: str, player_target: str, clean_match_name: str = None) -> list[HighlightMoment]:
+    # Use clean_match_name for validation; raw match_name for URL extraction
+    validation_name = clean_match_name or match_name
     query = f"{match_name} {year}" if year else match_name
     
     cache_file = "match_url_cache.json"
@@ -173,11 +175,11 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
     away_norm = normalize_name(away_team)
     match_str = f"{home_norm} {away_norm}"
     
-    query_words = normalize_name(match_name).split()
+    query_words = normalize_name(validation_name).split()
     for word in query_words:
         if word == 'vs' or len(word) <= 2: continue
         if word not in match_str:
-            print(f"  ✗ MATCH VALIDATION FAILED: You asked for '{match_name}', but WhoScored only had '{home_team} vs {away_team}'.")
+            print(f"  ✗ MATCH VALIDATION FAILED: You asked for '{validation_name}', but WhoScored only had '{home_team} vs {away_team}'.")
             print("  ✗ This means WhoScored does NOT have data for this specific match. Falling back...")
             return []
     
@@ -337,11 +339,13 @@ def _deserialize_moments(data):
         moments.append(m)
     return moments
 
-def fetch_player_touches(match_name: str, year: str, player_target: str) -> list[HighlightMoment]:
+def fetch_player_touches(match_name: str, year: str, player_target: str, clean_match_name: str = None) -> list[HighlightMoment]:
     """Public function to wrap the subprocess lifecycle. Uses GCS cache when available."""
     from pipeline.caching import get_cache, set_cache
     
-    cache_key = _gcs_cache_key(match_name, year, player_target)
+    # Use clean name for cache key so it doesn't include embedded IDs
+    cache_name = clean_match_name or match_name
+    cache_key = _gcs_cache_key(cache_name, year, player_target)
     cached = get_cache(cache_key)
     if cached:
         print(f"\n  ⚡ GCS CACHE HIT — Loading {len(cached['moments'])} touches from cloud cache")
@@ -349,7 +353,7 @@ def fetch_player_touches(match_name: str, year: str, player_target: str) -> list
 
     moments = []
     try:
-        moments = search_and_extract_whoscored(match_name, year, player_target)
+        moments = search_and_extract_whoscored(match_name, year, player_target, clean_match_name=clean_match_name)
         if moments:
             set_cache(cache_key, {"moments": _serialize_moments(moments)})
     except (AmbiguousMatchError, PlayerNotFoundError) as e:
