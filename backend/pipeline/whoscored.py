@@ -170,18 +170,23 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str,
     # 2.5 STRICT MATCH VALIDATION
     home_team = data.get('home', {}).get('name', '')
     away_team = data.get('away', {}).get('name', '')
+    print(f"  [✓] WhoScored match data: {home_team} vs {away_team}")
     
-    home_norm = normalize_name(home_team)
-    away_norm = normalize_name(away_team)
-    match_str = f"{home_norm} {away_norm}"
-    
-    query_words = normalize_name(validation_name).split()
-    for word in query_words:
-        if word == 'vs' or len(word) <= 2: continue
-        if word not in match_str:
-            print(f"  ✗ MATCH VALIDATION FAILED: You asked for '{validation_name}', but WhoScored only had '{home_team} vs {away_team}'.")
-            print("  ✗ This means WhoScored does NOT have data for this specific match. Falling back...")
-            return []
+    # Skip validation if the user explicitly selected this match via direct URL
+    if whoscored_url:
+        print(f"  [✓] Direct URL provided — skipping strict validation.")
+    else:
+        home_norm = normalize_name(home_team)
+        away_norm = normalize_name(away_team)
+        match_str = f"{home_norm} {away_norm}"
+        
+        query_words = normalize_name(validation_name).split()
+        for word in query_words:
+            if word == 'vs' or len(word) <= 2: continue
+            if word not in match_str:
+                print(f"  ✗ MATCH VALIDATION FAILED: You asked for '{validation_name}', but WhoScored only had '{home_team} vs {away_team}'.")
+                print("  ✗ This means WhoScored does NOT have data for this specific match. Falling back...")
+                return []
     
     # 3. Find Player (Robust Tokenized Matching with Initials Support)
     name_dict = data.get('playerIdNameDictionary', {})
