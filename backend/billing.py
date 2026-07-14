@@ -28,14 +28,16 @@ def check_can_process_request(user_id: str, is_edit: bool, token: str = None) ->
         sub["free_videos_used"] = 0
 
     # 2. Check Quotas
-    if is_edit:
-        # Edit Quota
-        if sub.get("player_highlights_used", 0) >= 1:
-            return False, "You've reached your limit of 1 video edit per day. Please try again tomorrow!"
-    else:
-        # Generation Quota
-        if sub.get("free_videos_used", 0) >= 1:
-            return False, "You've reached your limit of 1 new video generation per day. Please try again tomorrow!"
+    plan_type = sub.get("plan_type", "free")
+    if plan_type == "free":
+        if is_edit:
+            # Edit Quota
+            if sub.get("player_highlights_used", 0) >= 1:
+                return False, "You've reached your limit of 1 video edit per day. Please try again tomorrow!"
+        else:
+            # Generation Quota
+            if sub.get("free_videos_used", 0) >= 1:
+                return False, "You've reached your limit of 1 new video generation per day. Please try again tomorrow!"
 
     # 3. Check 2GB Storage Limit
     return check_storage_limit(user_id)

@@ -690,7 +690,7 @@ async def process_chat(
         is_edit = intent_data.get('intent') == "EDIT_COMMAND"
         can_process, block_reason = billing.check_can_process_request(user_id, is_edit, token)
         if not can_process:
-            msg = "You have exhausted your generation limits. Please upgrade to Pro!"
+            msg = block_reason
             database.add_message(active_session_id, {"role": "assistant", "content": msg, "status": "error"})
             return {"status": "out_of_credits", "message": msg, "reason": block_reason, "session_id": active_session_id}
 
