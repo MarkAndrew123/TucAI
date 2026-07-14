@@ -581,7 +581,8 @@ async def process_chat(
                             )
                             
                             active_session_id = get_or_create_session(user_id, token, session_id, default_title=prompt[:30], match_name=parent_project.get("match_name"), video_path=parent_video_path)
-                            database.add_message(active_session_id, {"role": "user", "content": prompt, "file": filename})
+                            display_prompt = re.sub(r'\s*\(?id:[^)]+\)?', '', prompt).strip()
+                            database.add_message(active_session_id, {"role": "user", "content": display_prompt, "file": filename})
                             
                             bot_msg = f"Applying edit: {success_msg}. Re-rendering highlight reel..."
                             database.add_message(active_session_id, {
@@ -667,7 +668,8 @@ async def process_chat(
                 player_name=intent_data.get('player_name'),
                 year=intent_data.get('year')
             )
-            database.add_message(active_session_id, {"role": "user", "content": prompt, "file": filename})
+            display_prompt = re.sub(r'\s*\(?id:[^)]+\)?', '', prompt).strip()
+            database.add_message(active_session_id, {"role": "user", "content": display_prompt, "file": filename})
             bot_msg = intent_data.get('chat_response', "Could you provide more details?")
             database.add_message(active_session_id, {"role": "assistant", "content": bot_msg})
             return {
@@ -681,7 +683,8 @@ async def process_chat(
         current_match = intent_data.get('match_name')
 
         active_session_id = get_or_create_session(user_id, token, session_id, default_title=(current_match or prompt)[:30], match_name=current_match, player_name=player_name, year=year, video_path=video_path)
-        database.add_message(active_session_id, {"role": "user", "content": prompt, "file": filename})
+        display_prompt = re.sub(r'\s*\(?id:[^)]+\)?', '', prompt).strip()
+        database.add_message(active_session_id, {"role": "user", "content": display_prompt, "file": filename})
 
         import uuid
         project_id = str(uuid.uuid4())
