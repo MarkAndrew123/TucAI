@@ -529,7 +529,7 @@ async def process_chat(
         )
         
         # INTERCEPT ID SELECTION: If the user just clicked a match candidate, override the LLM
-        if prompt.lower().strip().startswith("id:"):
+        if "(id:http" in prompt.lower():
             intent_data['match_name'] = prompt.strip()
             # Inherit intent from the previous message context if possible
             if known_player:

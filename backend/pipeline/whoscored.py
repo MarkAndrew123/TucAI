@@ -24,7 +24,7 @@ def search_and_extract_whoscored(match_name: str, year: str, player_target: str)
     cache_file = "match_url_cache.json"
     whoscored_url = None
     
-    url_match = re.search(r'id:?\s*(https?://.*whoscored\.com/.*)', query, re.IGNORECASE)
+    url_match = re.search(r'id:?\s*(https?://[^\s\)]+)', query, re.IGNORECASE)
     if url_match:
         whoscored_url = url_match.group(1)
         print(f"\n[DIRECT URL] User provided explicit WhoScored URL: {whoscored_url}")
