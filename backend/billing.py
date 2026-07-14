@@ -54,8 +54,15 @@ def check_storage_limit(user_id: str, plan_type: str = None) -> tuple[bool, str]
         sub = get_user_subscription(user_id)
         plan_type = sub.get("plan_type", "free")
         
-    if plan_type != "free":
-        return True, ""
+    # Define storage limits per plan (in bytes)
+    limits_gb = {
+        "free": 2,
+        "basic": 25,
+        "pro": 100
+    }
+    
+    limit_gb = limits_gb.get(plan_type, 2)
+    limit_bytes = limit_gb * 1024 * 1024 * 1024
 
     try:
         from google.cloud import storage
@@ -63,8 +70,8 @@ def check_storage_limit(user_id: str, plan_type: str = None) -> tuple[bool, str]
         bucket = storage_client.bucket("tuc-ai-raw-uploads")
         blobs = list(bucket.list_blobs(prefix=f"{user_id}/"))
         total_size = sum(b.size for b in blobs if b.size)
-        if total_size > 2 * 1024 * 1024 * 1024:
-            return False, "You have exceeded your 2GB storage limit. Please delete some old videos in your Workspace."
+        if total_size > limit_bytes:
+            return False, f"You have exceeded your {limit_gb}GB storage limit. Please delete some old videos in your Workspace."
     except Exception as e:
         print(f"Storage check failed (allowing request): {e}")
 
