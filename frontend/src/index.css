@@ -1308,6 +1308,86 @@ body {
   }
 }
 
+/* ─────────────────────────────────────────────────────────────
+   HUB MODAL RESPONSIVE
+   ───────────────────────────────────────────────────────────── */
+.hub-modal-content {
+  background: var(--bg-primary);
+  width: 90%;
+  max-width: 1200px;
+  height: 85vh;
+  border-radius: 16px;
+  overflow: hidden;
+  display: flex;
+  border: 1px solid var(--border-color);
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  flex-direction: row;
+}
+
+.hub-modal-sidebar {
+  width: 280px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+}
+
+.hub-modal-main {
+  flex: 1;
+  padding: 40px;
+  overflow-y: auto;
+  background: var(--bg-primary);
+}
+
+@media (max-width: 768px) {
+  .hub-modal-content {
+    flex-direction: column;
+    height: 95vh;
+    width: 95%;
+  }
+
+  .hub-modal-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+    padding: 16px;
+    height: auto;
+    max-height: 40vh;
+    overflow-y: auto;
+  }
+
+  .hub-modal-sidebar button {
+    padding: 8px;
+    font-size: 0.9rem;
+  }
+
+  .hub-modal-main {
+    padding: 20px;
+    flex: 1;
+  }
+
+  .chat-container {
+    height: calc(100vh - 70px) !important; 
+    border-radius: 0;
+  }
+
+  .messages-area {
+    padding: 1rem;
+  }
+  
+  .chat-input-area {
+    padding: 10px 1rem;
+    padding-bottom: env(safe-area-inset-bottom, 20px);
+  }
+
+  .chat-message.assistant .chat-message-bubble,
+  .chat-message.user .chat-message-bubble {
+    max-width: 95%;
+  }
+}
+
+
 /* ═══════════════════════════════════════════════════════════════
    PROCESSING MONITOR — Cinematic Stage Animations
    ═══════════════════════════════════════════════════════════════ */

@@ -48,16 +48,10 @@ const HubModal = ({
       background: 'rgba(0,0,0,0.8)', backdropFilter: 'blur(10px)',
       display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999
     }}>
-      <div className="modal-content" onClick={e => e.stopPropagation()} style={{
-        background: 'var(--bg-primary)', 
-        width: '90%', maxWidth: '1200px', height: '85vh', 
-        borderRadius: '16px', overflow: 'hidden', display: 'flex',
-        border: '1px solid var(--border-color)',
-        boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.5)'
-      }}>
+      <div className="hub-modal-content" onClick={e => e.stopPropagation()}>
         
         {/* Sidebar */}
-        <div style={{ width: '280px', background: 'var(--bg-secondary)', borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', padding: '24px' }}>
+        <div className="hub-modal-sidebar">
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '32px' }}>
             <h2 style={{ fontSize: '1.5rem', margin: 0, display: 'flex', alignItems: 'center', gap: '8px' }}>
               <div style={{ background: '#fff', color: '#000', padding: '2px 8px', borderRadius: '4px', fontWeight: 'bold' }}>T</div>
@@ -132,7 +126,7 @@ const HubModal = ({
         </div>
 
         {/* Main Content Area */}
-        <div style={{ flex: 1, padding: '40px', overflowY: 'auto', background: 'var(--bg-primary)' }}>
+        <div className="hub-modal-main">
           {tab === 'uploads' && (
             <div>
               <input 
